@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the article below and the software itself."
+type: software
+title: "Can SEAS5 seasonal forecasts drive daily streamflow prediction? Machine learning experiments in Central Asian catchments"
+version: 1.0.0
+license: MIT
+# TODO: date-released (YYYY-MM-DD) of the Zenodo release
+# TODO: doi — the Zenodo concept DOI
+authors:
+  - family-names: "Pineda Schwarz"
+    given-names: "Diegopablo"
+    affiliation: "Potsdam Institute for Climate Impact Research"
+  - family-names: "Didovets"
+    given-names: "Iulii"
+    affiliation: "Potsdam Institute for Climate Impact Research"
+  - family-names: "Fallah"
+    given-names: "Bijan"
+    affiliation: "Potsdam Institute for Climate Impact Research"
+  - family-names: "Tillakarim"
+    given-names: "Tursyn"
+    affiliation: "Research Center, Republican State Enterprise \"Kazhydromet\""
+preferred-citation:
+  type: article
+  title: "Can SEAS5 seasonal forecasts drive daily streamflow prediction? Machine learning experiments in Central Asian catchments"
+  journal: "Journal of Hydrology: Regional Studies"
+  # TODO(user): year, volume, doi of the published article
+  authors:
+    - family-names: "Pineda Schwarz"
+      given-names: "Diegopablo"
+    - family-names: "Didovets"
+      given-names: "Iulii"
+    - family-names: "Fallah"
+      given-names: "Bijan"
+    - family-names: "Tillakarim"
+      given-names: "Tursyn"

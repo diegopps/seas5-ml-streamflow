@@ -1,0 +1,30 @@
+# Conda environment for the whole pipeline, including the SEAS5 download.
+# Versions are those the paper's results were produced with.
+#
+#   conda env create -f environment.yml
+#   source activate FlowCast      # or: conda activate FlowCast
+#
+# pytorch and xgboost are pinned by version only: conda picks a CPU or CUDA
+# build to suit the machine. All models run on CPU.
+name: FlowCast
+channels:
+  - conda-forge
+dependencies:
+  # pipeline
+  - python=3.14.2
+  - numpy=2.4.1
+  - pandas=2.3.3
+  - pyarrow=23.0.1
+  - xarray=2025.12.0
+  - netcdf4=1.7.4
+  - scikit-learn=1.8.0
+  - xgboost=3.1.3
+  - pytorch=2.10.0
+  - matplotlib=3.10.8
+  - joblib=1.5.3
+  # SEAS5 download and GRIB -> NetCDF conversion (download_ecmwf/);
+  # eccodes and cdo also provide the grib_copy and cdo command-line tools
+  - cdsapi=0.7.7
+  - eccodes=2.44.0
+  - python-eccodes=2.44.0
+  - cdo=2.5.0

@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+
+# Input data (see config.toml)
+data/
+
+# Stage-00 feature tables (a file pattern, not dir/, so a symlink matches too)
+data_processed
+
+# Results
+model_results/01_exploration
+model_results/02_hyperparamtuning
+model_results/03_sensitivity
+
+# Raw plot-script outputs; submit_paper_figures.sh renames them to figNN.pdf
+model_results/00_plots/0*.pdf
+model_results/00_plots/*.csv
+
+# SLURM logs
+slurm_log/
+
+# ecmwf
+download_ecmwf/ecmwf
+download_ecmwf/sbatch_logs/
+download_ecmwf/temp_netcdf/
+download_ecmwf/ecmwf_download.log
+download_ecmwf/download_stdout.log
+
+# Trained Models
+trained_models
+
+# LaTeX build files
+LaTeX_report/*.aux
+LaTeX_report/*.bbl
+LaTeX_report/*.blg
+LaTeX_report/*.fdb_latexmk
+LaTeX_report/*.fls
+LaTeX_report/*.log
+LaTeX_report/*.out
+LaTeX_report/*.spl
+LaTeX_report/*.synctex.gz
+
+# Side tests
+side_tests/

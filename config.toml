@@ -1,0 +1,26 @@
+# FlowCast configuration — the only file you need to edit.
+# Relative paths are relative to this folder (the repository root).
+
+[paths]
+discharge_dir = "data/discharge_obs"   # one CSV per catchment: date, Q (m³/s)
+seas5_dir     = "data/seas5"           # grib/, netcdf_hindcast/, netcdf_forecast/
+
+[seas5_download]
+region     = "centralasia"             # "centralasia" or "europe"
+first_year = 1981
+last_year  = 2025
+
+[seas5_download.regions]               # bounding box: N, W, S, E (degrees)
+centralasia = [58, 46, 34, 88]
+europe      = [59, -11, 35, 26]
+
+[slurm]
+# Shell commands run before Python in every job and helper script (e.g.
+# loading a module and activating the conda environment); executed by
+# load_env.sh. Leave the block empty if `python` already works in a fresh
+# shell. Keep the layout: env_setup = """ on its own line, one command per
+# line, closing """ on its own line.
+env_setup = """
+module load miniforge
+source activate FlowCast
+"""
