@@ -155,8 +155,8 @@ data/seas5/
 Daily discharge was obtained from the Agency for Hydrometeorology of the
 Republic of Kazakhstan (Kazhydromet), the Agency for Hydrometeorology of the
 Republic of Tajikistan (Tajik Hydromet) and the Global Runoff Data Centre
-(GRDC). The Central Asian records are unpublished; they are available on
-request from the two agencies. The Alpine records are available from GRDC.
+(GRDC). The Central Asian records were provided by the two agencies and are
+not publicly available. The Alpine records are available from GRDC.
 
 Each catchment needs one CSV file in `discharge_dir` (see `config.toml`),
 named as in `catchments.py` (e.g. `Zeravshan_1936-2025_Q.csv`): a header row,
