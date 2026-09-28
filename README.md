@@ -61,7 +61,9 @@ the study was run on; change them if yours uses different names.
 - The full pipeline: SEAS5 download and conversion, preprocessing, the three
   experimental stages, and all code-produced figures.
 - The paper's figures (`model_results/00_plots/`, `model_results/00_appendix/`)
-  and manuscript source (`LaTeX_report/main.tex`, `references.bib`).
+  and manuscript source (`LaTeX_report/main.tex`, `references.bib`, and the
+  Elsevier class files `elsarticle.cls` and `elsarticle-harv.bst` it compiles
+  with).
 
 Not included: discharge observations, SEAS5 data, model results and trained
 models. See [Data](#data) for how to obtain the inputs.
@@ -358,7 +360,7 @@ names above.
 ├── model_results/
 │   ├── 00_plots/                    paper figures (main text)
 │   └── 00_appendix/                 paper figures (appendices)
-├── LaTeX_report/                    manuscript source (main.tex, references.bib)
+├── LaTeX_report/                    manuscript source (main.tex, references.bib, Elsevier class files)
 ├── CITATION.cff
 └── LICENSE
 ```
@@ -378,5 +380,9 @@ DOI) and this software (TODO(user): Zenodo DOI). Citation metadata is in
 
 - **Code:** MIT licence, see `LICENSE`.
 - **Figures and manuscript source** (`model_results/00_plots/`,
-  `model_results/00_appendix/`, `LaTeX_report/`): Creative Commons Attribution
-  4.0 International (CC BY 4.0), <https://creativecommons.org/licenses/by/4.0/>.
+  `model_results/00_appendix/`, `LaTeX_report/main.tex`,
+  `LaTeX_report/references.bib`): Creative Commons Attribution 4.0
+  International (CC BY 4.0), <https://creativecommons.org/licenses/by/4.0/>.
+- **Elsevier class files** (`LaTeX_report/elsarticle.cls`,
+  `LaTeX_report/elsarticle-harv.bst`): © Elsevier Ltd, distributed under the
+  LaTeX Project Public License 1.3 or later, <https://www.latex-project.org/lppl.txt>.
