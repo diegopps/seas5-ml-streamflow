@@ -1,5 +1,7 @@
 # Can SEAS5 seasonal forecasts drive daily streamflow prediction? Machine learning experiments in Central Asian catchments
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23015467.svg)](https://doi.org/10.5281/zenodo.23015467)
+
 Code for the article of the same title (Pineda Schwarz, Didovets, Fallah and
 Tillakarim, *Journal of Hydrology: Regional Studies*).
 
@@ -13,7 +15,7 @@ baselines, and compared untuned, after nested-CV tuning, and under corrupted
 forcing.
 
 - Article: [-] — DOI
-- This code (Zenodo): [-] — DOI
+- This code (Zenodo): [10.5281/zenodo.23015467](https://doi.org/10.5281/zenodo.23015467)
 
 **Contents:** [Quick start](#quick-start) · [What is included](#what-is-included) ·
 [Catchments](#catchments) · [Data](#data) · [Installation and configuration](#installation-and-configuration) ·
@@ -374,8 +376,8 @@ Not part of the repository: `data/` (the inputs, by default; see
 
 ## Citation and licence
 
-If you use this code, please cite the article (TODO(user): full reference and
-DOI) and this software (TODO(user): Zenodo DOI). Citation metadata is in
+If you use this code, please cite the article (reference to follow on
+publication) and this software, <https://doi.org/10.5281/zenodo.23015467>. Citation metadata is in
 `CITATION.cff`.
 
 - **Code:** MIT licence, see `LICENSE`.

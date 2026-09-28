@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use this code, please cite the article below and the software itself."
 type: software
 title: "Can SEAS5 seasonal forecasts drive daily streamflow prediction? Machine learning experiments in Central Asian catchments"
-version: 1.0.0
+version: 1.0.1
 license: MIT
 abstract: >-
   Code for a study testing whether ECMWF's openly available SEAS5 seasonal
@@ -22,8 +22,8 @@ keywords:
   - Machine learning
   - Forecast verification
   - Snow-dominated catchments
-# TODO: date-released (YYYY-MM-DD) of the Zenodo release
-# TODO: doi — the Zenodo concept DOI
+doi: 10.5281/zenodo.23015467
+date-released: "2026-09-28"
 authors:
   - family-names: "Pineda Schwarz"
     given-names: "Diegopablo"
@@ -41,7 +41,7 @@ preferred-citation:
   type: article
   title: "Can SEAS5 seasonal forecasts drive daily streamflow prediction? Machine learning experiments in Central Asian catchments"
   journal: "Journal of Hydrology: Regional Studies"
-  # TODO(user): year, volume, doi of the published article
+  # TODO: year, volume, doi of the published article
   authors:
     - family-names: "Pineda Schwarz"
       given-names: "Diegopablo"
