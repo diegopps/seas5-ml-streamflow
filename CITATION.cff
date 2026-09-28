@@ -4,6 +4,24 @@ type: software
 title: "Can SEAS5 seasonal forecasts drive daily streamflow prediction? Machine learning experiments in Central Asian catchments"
 version: 1.0.0
 license: MIT
+abstract: >-
+  Code for a study testing whether ECMWF's openly available SEAS5 seasonal
+  forecast carries usable information for daily discharge prediction at lead
+  times up to 214 days, in seven Central Asian and two European Alpine
+  catchments. Ridge regression, Random Forest, XGBoost and an LSTM network
+  are trained to predict the log-transformed discharge anomaly relative to the
+  day-of-year climatology and evaluated by leave-one-year-out
+  cross-validation against climatology, persistence and damped-persistence
+  baselines: untuned, after nested-CV tuning, and under corrupted forcing.
+  The repository covers the SEAS5 download and preprocessing, the three
+  experimental stages, and the scripts that reproduce the paper's figures.
+keywords:
+  - Seasonal streamflow forecasting
+  - Central Asia
+  - SEAS5
+  - Machine learning
+  - Forecast verification
+  - Snow-dominated catchments
 # TODO: date-released (YYYY-MM-DD) of the Zenodo release
 # TODO: doi — the Zenodo concept DOI
 authors:
