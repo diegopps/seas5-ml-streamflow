@@ -20,7 +20,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
 from .cv import make_folds
-from .features import DYN_VARS
+from .features import DYN_VARS, apply_fold_climatology
 from .metrics import calc_nse, calc_kge, calc_acc, crps_from_pred_df
 from .evaluate import ensemble_mean, score_frame
 
@@ -307,11 +307,15 @@ def predict_trajectories(model, trajectories):
 # LOGO-CV RUNNER
 # ═══════════════════════════════════════════════════════════════════════
 
-def run_lstm(df, unique_years, doy_clim, out_dir):
+def run_lstm(df, unique_years, fit_clim, out_dir):
     """
     LOGO-CV loop for the baseline LSTM. Saves the best checkpoint per fold to
     out_dir and returns per-fold metrics, ensemble-mean predictions across all
     folds, and per-member predictions (for CRPS).
+
+    `fit_clim` (a utils.climatology.ClimatologyFitter) builds each fold's
+    climatology from all its non-test years (early-stopping years included);
+    the fold's a0 is written against it, rewriting df['a0'] in place.
     """
     torch.manual_seed(SEED)
     np.random.seed(SEED)
@@ -333,6 +337,7 @@ def run_lstm(df, unique_years, doy_clim, out_dir):
 
         if not (df[GROUP_COL] == test_year).any():
             continue
+        doy_clim = apply_fold_climatology(df, fit_clim, split['train_years'])
 
         # Whole trajectories from the full frame; each call scores only its
         # own years (see build_trajectories).

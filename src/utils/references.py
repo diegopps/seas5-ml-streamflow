@@ -4,8 +4,11 @@ utils.references – Deterministic reference baselines.
 These baselines are identical across ensemble members, so rows are deduplicated
 to one per (init_date, date) and no CRPS is computed.
 
-  climatology         predicts a zero anomaly at every lead day (NSE = 0,
-                      ACC = NaN by construction).
+Every fold uses its own climatology (and a0), fit on the fold's training
+hydro years only.
+
+  climatology         predicts a zero anomaly at every lead day, i.e. the
+                      fold's climatology (ACC = NaN by construction).
   persistence         carries the observed anomaly at initialisation forward
                       flat (phi = 1).
   damped_persistence  decays that anomaly geometrically, a_hat(h) = phi**h * a0,
@@ -21,6 +24,7 @@ from .climatology import eligible_hydro_years
 from .cv import make_folds
 from .data import hydro_year_of
 from .evaluate import score_frame
+from .features import apply_fold_climatology
 
 
 def dedup_unique(df: pd.DataFrame) -> pd.DataFrame:
@@ -72,8 +76,12 @@ def anomaly_record(obs_daily_q: pd.Series, doy_clim: dict,
     return np.log1p(keep) - clim
 
 
-def run_climatology(df, unique_years, doy_clim, lead_bins):
-    """LOGO-CV loop for the climatology baseline (zero-anomaly forecast)."""
+def run_climatology(df, unique_years, fit_clim, lead_bins):
+    """
+    LOGO-CV loop for the climatology baseline (zero-anomaly forecast).
+    Each fold forecasts its own climatology, fit by `fit_clim` (a
+    utils.climatology.ClimatologyFitter) on the fold's training years.
+    """
     df_unique = dedup_unique(df)
     fold_metrics, all_pred_dfs = [], []
 
@@ -84,6 +92,7 @@ def run_climatology(df, unique_years, doy_clim, lead_bins):
         df_test = df_unique[df_unique['hydro_year'] == test_year].copy()
         if len(df_test) == 0:
             continue
+        doy_clim = fit_clim(split['train_years'])
 
         df_test['doy'] = df_test['date'].dt.dayofyear
         q_clim_log = df_test['doy'].map(doy_clim).values
@@ -100,18 +109,25 @@ def run_climatology(df, unique_years, doy_clim, lead_bins):
     return _finalise_deterministic(fold_metrics, all_pred_dfs)
 
 
-def run_persistence(df, unique_years, doy_clim, phi, model_name):
-    """LOGO-CV loop for persistence (phi=1) or damped persistence (phi<1)."""
-    df_unique = dedup_unique(df)
+def run_persistence(df, unique_years, fit_clim, phi, model_name):
+    """
+    LOGO-CV loop for persistence (phi=1) or damped persistence (phi<1).
+    Each fold's a0 and climatology come from `fit_clim` (a
+    utils.climatology.ClimatologyFitter) on the fold's training years.
+    """
     fold_metrics, all_pred_dfs = [], []
 
     for split in make_folds(unique_years):
         test_year = split['test_year']
         fold_t0 = time.time()
 
-        df_test = df_unique[df_unique['hydro_year'] == test_year].copy()
-        if len(df_test) == 0:
+        df_fold = df[df['hydro_year'] == test_year]
+        if len(df_fold) == 0:
             continue
+        # Only the test rows are used, so a0 is written on that slice alone.
+        df_test = dedup_unique(df_fold)
+        doy_clim = apply_fold_climatology(df_test, fit_clim,
+                                          split['train_years'])
 
         df_test['doy'] = df_test['date'].dt.dayofyear
         q_clim_log = df_test['doy'].map(doy_clim)

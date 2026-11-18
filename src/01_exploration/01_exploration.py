@@ -27,11 +27,13 @@ Output:
         summary.csv
         best_model_fold<N>.pt        (lstm only)
 
-All models predict a log1p(Q) anomaly relative to a single global smoothed
-day-of-year climatology (fit once per catchment on the observed record
-from clim_start_year (1981) onward, excluding skip_years), back-transformed to discharge and
-scored with NSE, KGE and — for the ensemble models — CRPS in real Q space, and
-with ACC on log1p anomalies (see utils.metrics.calc_acc).
+All models predict a log1p(Q) anomaly relative to a smoothed day-of-year
+climatology fit PER FOLD on that fold's training hydro years only (from
+clim_start_year onward, skip_years excluded; see utils.climatology), with the
+antecedent anomaly a0 formed against the same fold climatology. Predictions
+are back-transformed to discharge and scored with NSE, KGE and — for the
+ensemble models — CRPS in real Q space, and with ACC on log1p anomalies (see
+utils.metrics.calc_acc), each fold against its own climatology (Q_clim).
 """
 
 import sys
@@ -44,8 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/, for utils
 
 from utils.catchments import CATCHMENTS, SHARED
 from utils.data import load_obs_discharge, build_analysis_frame
-from utils.climatology import compute_climatology
-from utils.features import set_a0
+from utils.climatology import ClimatologyFitter
 from utils.io_results import results_dir, build_summary, write_outputs
 from utils.paths import PROCESSED_DIR
 from utils.tabular import run_tabular_model
@@ -90,8 +91,8 @@ def parse_args():
 # PER-MODEL DISPATCH
 # ═══════════════════════════════════════════════════════════════════════
 
-def run_climatology(catchment_id, df, unique_years, doy_clim, t0):
-    mdf, preds = ref.run_climatology(df, unique_years, doy_clim, LEAD_BINS)
+def run_climatology(catchment_id, df, unique_years, fit_clim, t0):
+    mdf, preds = ref.run_climatology(df, unique_years, fit_clim, LEAD_BINS)
     summary = build_summary(catchment_id, 'climatology', mdf,
                             time.time() - t0, has_crps=False,
                             extra={'clim_start_year': CLIM_START_YEAR})
@@ -101,12 +102,12 @@ def run_climatology(catchment_id, df, unique_years, doy_clim, t0):
     write_outputs(results_dir(catchment_id, 'climatology'), mdf, preds, summary)
 
 
-def run_persistence(catchment_id, df, unique_years, doy_clim,
+def run_persistence(catchment_id, df, unique_years, fit_clim,
                     obs_daily_q, skip_years, t0):
     # Plain persistence (phi = 1).
     t_p = time.time()
     mdf_p, preds_p = ref.run_persistence(
-        df, unique_years, doy_clim, phi=1.0,
+        df, unique_years, fit_clim, phi=1.0,
         model_name='persistence')
     summary_p = build_summary(catchment_id, 'persistence', mdf_p,
                               time.time() - t_p, has_crps=False,
@@ -118,14 +119,16 @@ def run_persistence(catchment_id, df, unique_years, doy_clim,
     # Damped persistence — phi estimated once from the anomaly record over the
     # same CLIM_START_YEAR window the climatology is fitted on, so the decay
     # rate and the climatology it decays towards describe one period.
-    anomaly_full = ref.anomaly_record(obs_daily_q, doy_clim, skip_years,
+    # TODO(R1): still one phi on all years, against the all-years
+    # climatology; to be estimated per fold on the training years only.
+    anomaly_full = ref.anomaly_record(obs_daily_q, fit_clim(), skip_years,
                                       start_year=CLIM_START_YEAR)
     phi = ref.estimate_phi(anomaly_full)
     print(f"\nDamped persistence phi = {phi:.4f}\n")
 
     t_d = time.time()
     mdf_d, preds_d = ref.run_persistence(
-        df, unique_years, doy_clim, phi=phi,
+        df, unique_years, fit_clim, phi=phi,
         model_name='damped_persistence')
     summary_d = build_summary(catchment_id, 'damped_persistence', mdf_d,
                               time.time() - t_d, has_crps=False,
@@ -135,10 +138,10 @@ def run_persistence(catchment_id, df, unique_years, doy_clim,
                   mdf_d, preds_d, summary_d)
 
 
-def run_tabular(catchment_id, model, df, unique_years, doy_clim, t0):
+def run_tabular(catchment_id, model, df, unique_years, fit_clim, t0):
     factory = TABULAR_FACTORIES[model]
     mdf, all_preds, all_members = run_tabular_model(
-        model, df, unique_years, doy_clim, factory, LEAD_BINS)
+        model, df, unique_years, fit_clim, factory, LEAD_BINS)
 
     extra = {'clim_start_year': CLIM_START_YEAR}
     if model == 'ridge' and 'best_alpha' in mdf.columns:
@@ -149,9 +152,9 @@ def run_tabular(catchment_id, model, df, unique_years, doy_clim, t0):
                   members=all_members)
 
 
-def run_lstm(catchment_id, df, unique_years, doy_clim, t0):
+def run_lstm(catchment_id, df, unique_years, fit_clim, t0):
     out_dir = results_dir(catchment_id, 'lstm')
-    mdf, all_preds = lstm_mod.run_lstm(df, unique_years, doy_clim, out_dir)
+    mdf, all_preds = lstm_mod.run_lstm(df, unique_years, fit_clim, out_dir)
 
     # Ensemble-mean daily predictions across all folds, saved as the output.
     from utils.evaluate import ensemble_mean
@@ -179,28 +182,28 @@ def main():
     print(f"STAGE 01 EXPLORATION: {cfg['name']} ({catchment_id}) — {model}")
     print("=" * 60)
 
-    # ── Load data and the single global climatology ──────────────────
+    # ── Load data; the climatology (and a0) is fit per fold ──────────
     obs_daily_q = load_obs_discharge(cfg['discharge_csv'])
     df, unique_years = build_analysis_frame(in_path, obs_daily_q, skip_years)
-    doy_clim = compute_climatology(obs_daily_q, skip_years, CLIM_WINDOW,
-                                   start_year=CLIM_START_YEAR)
-    set_a0(df, doy_clim)    # a0 = logq0 - climatology on the init date
+    fit_clim = ClimatologyFitter(obs_daily_q, skip_years, CLIM_WINDOW,
+                                 start_year=CLIM_START_YEAR)
 
     print(f"  Rows: {len(df):,} | Hydro years: {len(unique_years)} "
           f"({min(unique_years)}-{max(unique_years)})")
-    print(f"  Global climatology: {CLIM_START_YEAR}+ minus skip_years "
-          f"({len(skip_years)} skipped), {CLIM_WINDOW}-day smoothing")
+    print(f"  Climatology: per fold, training hydro years from HY"
+          f"{CLIM_START_YEAR} minus skip_years ({len(skip_years)} skipped), "
+          f"{CLIM_WINDOW}-day smoothing")
 
     # ── Dispatch ──────────────────────────────────────────────────────
     if model == 'climatology':
-        run_climatology(catchment_id, df, unique_years, doy_clim, t0)
+        run_climatology(catchment_id, df, unique_years, fit_clim, t0)
     elif model == 'persistence':
-        run_persistence(catchment_id, df, unique_years, doy_clim,
+        run_persistence(catchment_id, df, unique_years, fit_clim,
                         obs_daily_q, skip_years, t0)
     elif model in TABULAR_FACTORIES:
-        run_tabular(catchment_id, model, df, unique_years, doy_clim, t0)
+        run_tabular(catchment_id, model, df, unique_years, fit_clim, t0)
     elif model == 'lstm':
-        run_lstm(catchment_id, df, unique_years, doy_clim, t0)
+        run_lstm(catchment_id, df, unique_years, fit_clim, t0)
 
     print(f"\n{'=' * 60}")
     print(f"DONE in {(time.time() - t0) / 60:.1f} minutes")

@@ -2,7 +2,8 @@
 utils.tabular – Flat-table regression models (Ridge, Random Forest,
 XGBoost) under LOGO-CV.
 
-All three share one training loop: per fold, build the flat train/test tables,
+All three share one training loop: per fold, fit the fold's climatology and
+a0 on its training years, build the flat train/test tables,
 standardise features on the training rows, fit the estimator on the anomaly
 target, back-transform predictions to discharge, and score the ensemble mean.
 The models differ only in the estimator constructed per fold and, for Ridge,
@@ -15,12 +16,12 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 from .cv import make_folds
-from .features import TABULAR_FEATURES, build_flat_table
+from .features import TABULAR_FEATURES, build_flat_table, apply_fold_climatology
 from .metrics import crps_from_pred_df
 from .evaluate import ensemble_mean, score_frame
 
 
-def run_tabular_model(model_name, df, unique_years, doy_clim,
+def run_tabular_model(model_name, df, unique_years, fit_clim,
                       estimator_factory, lead_bins,
                       per_fold_extra=None):
     """
@@ -34,8 +35,10 @@ def run_tabular_model(model_name, df, unique_years, doy_clim,
         Analysis frame (features + observed Q, skip_years removed).
     unique_years : list[int]
         Hydro years present in df.
-    doy_clim : dict
-        Global DOY climatology (log1p space).
+    fit_clim : utils.climatology.ClimatologyFitter
+        Builds each fold's DOY climatology (log1p space) from the fold's
+        training years; the fold's a0 is written against it. Note this
+        rewrites df['a0'] in place, once per fold.
     estimator_factory : callable(X_tr, y_tr) -> (fitted_estimator, fold_info)
         Builds and fits the estimator for a fold. `fold_info` is a dict of
         extra per-fold values to record (e.g. {'best_alpha': ...}); may be {}.
@@ -62,10 +65,12 @@ def run_tabular_model(model_name, df, unique_years, doy_clim,
         tr_yrs = set(split['train_years'])   # tabular models use all non-test years
         fold_t0 = time.time()
 
+        if not (df['hydro_year'] == test_year).any():
+            continue
+        # Fold climatology and a0 first, so both feature tables carry them.
+        doy_clim = apply_fold_climatology(df, fit_clim, split['train_years'])
         df_tr = df[df['hydro_year'].isin(tr_yrs)]
         df_test = df[df['hydro_year'] == test_year]
-        if len(df_test) == 0:
-            continue
 
         flat_tr = build_flat_table(df_tr, doy_clim)
         flat_test = build_flat_table(df_test, doy_clim)

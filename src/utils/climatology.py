@@ -14,6 +14,11 @@ Which hydro years may enter any climatology (`eligible_hydro_years`):
 from SHARED['clim_start_year'] onward, the catchment's skip_years excluded.
 `compute_climatology` fits on those, optionally restricted further to an
 explicit set of training hydro years (`train_years`), e.g. one fold's.
+
+Cross-validation code does not call `compute_climatology` directly: it gets a
+`ClimatologyFitter` (built once per catchment) and asks it for each fold's
+climatology by passing that fold's training hydro years, usually through
+utils.features.apply_fold_climatology, which also writes the fold's a0.
 """
 
 import numpy as np
@@ -115,3 +120,43 @@ def compute_climatology(obs_daily_q: pd.Series,
             f"{len(keep_years)} hydro years) -- refusing to return it."
         )
     return clim
+
+
+class ClimatologyFitter:
+    """
+    Per-fold climatology for one catchment.
+
+    Holds the catchment's fixed inputs (observed record, skip_years, window,
+    start year); calling it with a fold's training hydro years returns that
+    fold's climatology (`compute_climatology(..., train_years=train_years)`).
+    `fit()` / `fit(None)` returns the climatology on every eligible year, for
+    fits that hold no year out (e.g. the final all-years model).
+
+    Results are cached by the set of training years, so repeated requests
+    (the same inner fold for every Stage 2 config) are free. The returned
+    dicts are shared between callers and must not be modified.
+
+    Usage:
+        fit_clim = ClimatologyFitter(obs, skip_years, window,
+                                     start_year=SHARED['clim_start_year'])
+        doy_clim = fit_clim(split['train_years'])
+    """
+
+    def __init__(self, obs_daily_q: pd.Series, skip_years: set,
+                 window: int = 31, *, start_year: int):
+        self.obs_daily_q = obs_daily_q
+        self.skip_years = set(skip_years)
+        self.window = window
+        self.start_year = start_year
+        self._cache = {}
+
+    def __call__(self, train_years=None) -> dict:
+        key = (None if train_years is None
+               else frozenset(int(y) for y in train_years))
+        if key not in self._cache:
+            self._cache[key] = compute_climatology(
+                self.obs_daily_q, self.skip_years, self.window,
+                start_year=self.start_year, train_years=key)
+        return self._cache[key]
+
+    fit = __call__

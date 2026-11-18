@@ -52,6 +52,23 @@ def set_a0(df: pd.DataFrame, doy_clim: dict) -> pd.DataFrame:
     return df
 
 
+def apply_fold_climatology(df: pd.DataFrame, fit_clim, train_years) -> dict:
+    """
+    Prepare one fold: fit its climatology on `train_years` (hydro years) with
+    `fit_clim` (a utils.climatology.ClimatologyFitter), write a0 against that
+    climatology into `df` in place (see `set_a0`), and return the climatology.
+
+    Call it at the top of every fold, before any feature table or trajectory
+    is built from `df`, and pass the returned climatology to everything the
+    fold builds (target, back-transform, Q_clim). `train_years` is every year
+    the fold may learn from, early-stopping years included; never the years
+    the fold scores.
+    """
+    doy_clim = fit_clim(train_years)
+    set_a0(df, doy_clim)
+    return doy_clim
+
+
 def build_flat_table(df: pd.DataFrame, doy_clim: dict) -> pd.DataFrame:
     """
     Flatten the feature frame to one row per forecast timestep per member.
