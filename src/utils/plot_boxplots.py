@@ -29,7 +29,7 @@ line at its median across folds (see doy_reference_acc). It is a forecast
 that knows nothing but the date, resolving the seasonal cycle more finely than
 the 31-day climatology, so ACC above that line rather than above zero is skill
 beyond the seasonal cycle. It is scored with the same calc_acc, against the
-same stored climatology, on the same rows as the reference boxes.
+same stored (per-fold) climatology, on the same rows as the reference boxes.
 
 Statistical notes:
   - Boxplots (median + IQR) are used instead of mean +/- SE bars, since
@@ -202,6 +202,13 @@ def doy_reference_acc(catchment: str, lo: int, hi: int, min_rows=30):
     this forecast resolves them, and so earns a positive ACC without any
     information about the year being forecast. It is the analytic limit of a
     model trained on day-of-year features alone.
+
+    Forecast and observed anomalies share one reference: the forecast is built
+    from exactly the fold's training years (every fold year but `hy`), the
+    same years the fold's climatology was fit on, and is scored against that
+    fold climatology (the scaffold's Q_clim). A reference that included the
+    test year would correlate the forecast anomaly negatively with the
+    observed one (Barnston & van den Dool 1993) and bias this ACC low.
     """
     scaffold = pl.load_predictions(catchment, DOY_REF_SCAFFOLD)
     if scaffold is None:
@@ -209,6 +216,8 @@ def doy_reference_acc(catchment: str, lo: int, hi: int, min_rows=30):
     from .data import hydro_year_of
     obs = _climatology_period_obs(catchment)
     obs_hy = hydro_year_of(obs.index)
+    # The scaffold holds one fold per scored hydro year; fold years = CV years.
+    fold_years = set(scaffold['hydro_year'].astype(int).unique().tolist())
 
     sub = (scaffold[(scaffold['lead_day'] >= lo) & (scaffold['lead_day'] <= hi)]
              .dropna(subset=['Q_raw', 'Q_clim']))
@@ -216,7 +225,7 @@ def doy_reference_acc(catchment: str, lo: int, hi: int, min_rows=30):
     for hy, g in sub.groupby('hydro_year'):
         if len(g) < min_rows:
             continue
-        train = obs[obs_hy != hy]
+        train = obs[np.isin(obs_hy, list(fold_years - {int(hy)}))]
         doy_mean = (np.log1p(train).groupby(train.index.dayofyear).mean()
                       .reindex(range(1, 367)).ffill().bfill())
         q_pred = np.expm1(g['date'].dt.dayofyear.map(doy_mean).values)
