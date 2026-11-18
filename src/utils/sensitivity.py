@@ -84,6 +84,7 @@ from sklearn.linear_model import RidgeCV
 from sklearn.ensemble import RandomForestRegressor
 
 from .cv import SEED
+from .data import initialised_in
 from .evaluate import ensemble_mean, score_frame
 from .features import (TABULAR_FEATURES, build_flat_table, set_a0,
                        apply_fold_climatology)
@@ -258,7 +259,8 @@ def fit_tabular(model, df, *, fit_clim, config, fit_yrs):
     into `df` in place). Returns a dict holding everything inference needs,
     the climatology included, or None if the training fold is empty."""
     doy_clim = apply_fold_climatology(df, fit_clim, fit_yrs)
-    df_tr = df[df[GROUP_COL].isin(fit_yrs)]
+    # Only trajectories initialised in a training year train.
+    df_tr = df[df[GROUP_COL].isin(fit_yrs) & initialised_in(df, fit_yrs)]
     flat_tr = build_flat_table(df_tr, doy_clim)
     if len(flat_tr) == 0:
         return None
@@ -314,10 +316,14 @@ def fit_lstm(df, *, fit_clim, config, tr_yrs, val_yrs, ckpt_path):
 
     # Whole trajectories from the full frame; each call scores only its own
     # years (see lstm.build_trajectories).
+    # Only trajectories initialised in a training year train or early-stop.
+    train_years = set(tr_yrs) | set(val_yrs)
     tr_trajs, dyn_sc = lstm_mod.build_trajectories(df, doy_clim, None, True,
-                                                   score_years=tr_yrs)
+                                                   score_years=tr_yrs,
+                                                   init_years=train_years)
     val_trajs, _ = lstm_mod.build_trajectories(df, doy_clim, dyn_sc, False,
-                                               score_years=val_yrs)
+                                               score_years=val_yrs,
+                                               init_years=train_years)
 
     tr_loader = DataLoader(lstm_mod.TrajectoryDataset(tr_trajs),
                            batch_size=config['batch'], shuffle=True,

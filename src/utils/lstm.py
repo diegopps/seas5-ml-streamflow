@@ -5,7 +5,9 @@ Each forecast trajectory (one ensemble member of one initialisation) is
 processed as a sequence of dynamic features from a zero hidden state; there are
 no static features. Trajectories are always read whole, from lead 0, even
 where they cross into a hydro year outside the fold's scored years (see
-build_trajectories). The network predicts a log1p(Q) anomaly relative to the DOY
+build_trajectories). Training and early-stopping sets use only trajectories
+initialised in the fold's training years (`init_years`; see
+utils.data.initialised_in for why). The network predicts a log1p(Q) anomaly relative to the DOY
 climatology, which is back-transformed to discharge for scoring. All ensemble
 members are treated as independent training sequences and averaged at
 evaluation.
@@ -20,6 +22,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
 from .cv import make_folds
+from .data import hydro_year_of
 from .features import DYN_VARS, apply_fold_climatology
 from .metrics import calc_nse, calc_kge, calc_acc, crps_from_pred_df
 from .evaluate import ensemble_mean, score_frame
@@ -90,7 +93,8 @@ _LOSS_FN = nse_loss_real if LOSS_SPACE == 'real' else nse_loss_anomaly
 # TRAJECTORIES / DATASET
 # ═══════════════════════════════════════════════════════════════════════
 
-def build_trajectories(df, doy_clim, dyn_scaler, is_train, score_years=None):
+def build_trajectories(df, doy_clim, dyn_scaler, is_train, score_years=None,
+                       init_years=None):
     """
     Convert the flat feature frame into a list of trajectory dicts, one per
     (init_date, member). Dynamic features are standardised using the training
@@ -107,10 +111,22 @@ def build_trajectories(df, doy_clim, dyn_scaler, is_train, score_years=None):
     predict_trajectories does not return them. Their inputs are SEAS5 forcing
     and a0, both known at initialisation, so no held-out discharge enters.
     None keeps every row scored (df taken as already restricted).
+
+    init_years: if given, only trajectories INITIALISED in these hydro years
+    are built. Training and early-stopping calls pass the run's training
+    years, so a trajectory initialised in a held-out year never trains, even
+    on its rows that verify in a training year (they carry the held-out
+    year's a0; see utils.data.initialised_in). Prediction calls leave it
+    None: a test year is scored on every trajectory that reaches it.
     """
     if score_years is not None:
         score_years = set(score_years)
-        inits = df.loc[df[GROUP_COL].isin(score_years), 'init_date'].unique()
+    if score_years is not None or init_years is not None:
+        inits = (df.loc[df[GROUP_COL].isin(score_years), 'init_date'].unique()
+                 if score_years is not None else df['init_date'].unique())
+        if init_years is not None:
+            inits = inits[np.isin(hydro_year_of(inits),
+                                  [int(y) for y in init_years])]
         df = df[df['init_date'].isin(inits)]
 
     trajectories = []
@@ -340,11 +356,15 @@ def run_lstm(df, unique_years, fit_clim, out_dir):
         doy_clim = apply_fold_climatology(df, fit_clim, split['train_years'])
 
         # Whole trajectories from the full frame; each call scores only its
-        # own years (see build_trajectories).
+        # own years (see build_trajectories). Training and early stopping use
+        # only trajectories initialised in the fold's training years.
+        train_years = split['train_years']
         tr_trajs, dyn_sc = build_trajectories(df, doy_clim, None, True,
-                                              score_years=tr_yrs)
+                                              score_years=tr_yrs,
+                                              init_years=train_years)
         val_trajs, _ = build_trajectories(df, doy_clim, dyn_sc, False,
-                                          score_years=val_yrs)
+                                          score_years=val_yrs,
+                                          init_years=train_years)
         test_trajs, _ = build_trajectories(df, doy_clim, dyn_sc, False,
                                            score_years=[test_year])
 

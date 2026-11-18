@@ -40,6 +40,9 @@ train/score call fits its own climatology (and writes its own a0) on exactly
 the years it trains on, tr_yrs | val_yrs (`train_climatology`): the
 inner-training years for an inner fold, all non-test years for the outer
 retrain. The scored years (inner holdout, outer test year) never enter it.
+Likewise, each run trains only on trajectories initialised in its training
+years (utils.data.initialised_in), so neither the scored years' nor the
+outer-test year's a0 reaches training.
 """
 
 import numpy as np
@@ -48,6 +51,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestRegressor
 
 from .cv import SEED, VAL_FRAC
+from .data import initialised_in
 from .evaluate import ensemble_mean, score_frame
 from .features import TABULAR_FEATURES, build_flat_table, apply_fold_climatology
 from .metrics import crps_from_pred_df
@@ -242,10 +246,15 @@ def train_and_score_lstm(df, obs_daily_q, *, fit_clim, hp, tr_yrs, val_yrs,
 
     # Whole trajectories from the full frame; each call scores only its own
     # years (see lstm.build_trajectories).
+    # Training and early stopping: only trajectories initialised in this
+    # run's training years (never in the scored or outer-test years).
+    train_years = set(tr_yrs) | set(val_yrs)
     tr_trajs, dyn_sc = lstm_mod.build_trajectories(df, doy_clim, None, True,
-                                                   score_years=tr_yrs)
+                                                   score_years=tr_yrs,
+                                                   init_years=train_years)
     val_trajs, _ = lstm_mod.build_trajectories(df, doy_clim, dyn_sc, False,
-                                               score_years=val_yrs)
+                                               score_years=val_yrs,
+                                               init_years=train_years)
     score_trajs, _ = lstm_mod.build_trajectories(df, doy_clim, dyn_sc, False,
                                                  score_years=score_yrs)
 
@@ -347,7 +356,8 @@ def train_and_score_tabular(model):
         if not df[GROUP_COL].isin(score_yrs).any():
             return None, None
         doy_clim = train_climatology(df, fit_clim, tr_yrs, val_yrs)
-        df_tr = df[df[GROUP_COL].isin(fit_yrs)]
+        # Only trajectories initialised in a training year train.
+        df_tr = df[df[GROUP_COL].isin(fit_yrs) & initialised_in(df, fit_yrs)]
         df_score = df[df[GROUP_COL].isin(score_yrs)]
 
         flat_tr = build_flat_table(df_tr, doy_clim)

@@ -3,7 +3,8 @@ utils.tabular – Flat-table regression models (Ridge, Random Forest,
 XGBoost) under LOGO-CV.
 
 All three share one training loop: per fold, fit the fold's climatology and
-a0 on its training years, build the flat train/test tables,
+a0 on its training years, build the flat train/test tables (training rows
+only from trajectories initialised in training years),
 standardise features on the training rows, fit the estimator on the anomaly
 target, back-transform predictions to discharge, and score the ensemble mean.
 The models differ only in the estimator constructed per fold and, for Ridge,
@@ -16,6 +17,7 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 from .cv import make_folds
+from .data import initialised_in
 from .features import TABULAR_FEATURES, build_flat_table, apply_fold_climatology
 from .metrics import crps_from_pred_df
 from .evaluate import ensemble_mean, score_frame
@@ -69,7 +71,10 @@ def run_tabular_model(model_name, df, unique_years, fit_clim,
             continue
         # Fold climatology and a0 first, so both feature tables carry them.
         doy_clim = apply_fold_climatology(df, fit_clim, split['train_years'])
-        df_tr = df[df['hydro_year'].isin(tr_yrs)]
+        # Training rows: verifying in a training year AND from a trajectory
+        # initialised in one (drops the test year's trajectories that cross
+        # into the next year; see utils.data.initialised_in).
+        df_tr = df[df['hydro_year'].isin(tr_yrs) & initialised_in(df, tr_yrs)]
         df_test = df[df['hydro_year'] == test_year]
 
         flat_tr = build_flat_table(df_tr, doy_clim)

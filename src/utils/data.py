@@ -23,6 +23,21 @@ def hydro_year_of(dates) -> np.ndarray:
     return np.asarray(dates.year) + (np.asarray(dates.month) >= 10)
 
 
+def initialised_in(df: pd.DataFrame, years) -> np.ndarray:
+    """
+    Boolean row mask: True where the row's trajectory was initialised in one
+    of the hydro `years` (hydro year of init_date, not of the verification
+    date).
+
+    Training rule used by every stage: a training run uses only trajectories
+    initialised in its own training years. A trajectory initialised in a
+    held-out year can verify partly in a training year (it crosses 1 Oct),
+    and those rows carry the held-out year's discharge as a0; this mask is
+    what keeps them out of training.
+    """
+    return np.isin(hydro_year_of(df['init_date']), [int(y) for y in years])
+
+
 def load_obs_discharge(discharge_csv: str) -> pd.Series:
     """
     Load observed daily discharge as a Series indexed by normalised date.
