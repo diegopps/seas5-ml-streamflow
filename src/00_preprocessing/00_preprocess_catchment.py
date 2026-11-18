@@ -24,7 +24,7 @@ Schema (one row per date × init_date × member):
 
 Rows whose init_date has no observed discharge, or whose init_date falls in the
 catchment's skip_years, are dropped before writing — every row therefore has a
-finite, trustworthy a0 (see utils.climatology.compute_global_climatology
+finite, trustworthy a0 (see utils.climatology.compute_climatology
 and the skip_years comment in src/utils/catchments.py).
 
 Units:
@@ -54,7 +54,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/, for utils
 
 from utils.catchments import CATCHMENTS, SHARED
-from utils.climatology import compute_global_climatology
+from utils.climatology import compute_climatology
 from utils.data import build_analysis_frame
 from utils.paths import PROCESSED_DIR
 
@@ -405,7 +405,7 @@ def main():
         raise ValueError("No init_date matched the discharge index — "
                          "check date normalisation in load_discharge().")
 
-    doy_clim = compute_global_climatology(obs_daily_q, SKIP_YEARS, CLIM_WINDOW,
+    doy_clim = compute_climatology(obs_daily_q, SKIP_YEARS, CLIM_WINDOW,
                                           start_year=CLIM_START_YEAR)
     print(f"  Global climatology: {CLIM_START_YEAR}+ minus skip_years "
           f"({len(SKIP_YEARS)} skipped), {CLIM_WINDOW}-day smoothing")

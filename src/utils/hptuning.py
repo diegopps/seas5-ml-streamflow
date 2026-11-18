@@ -36,7 +36,7 @@ checkpoints to `ckpt_path`; the tabular models do neither, so they fold
 `val_yrs` back into training and ignore `ckpt_path`.
 
 `doy_clim` is the single global climatology for the catchment (see
-`utils.climatology.compute_global_climatology`), computed once and
+`utils.climatology.compute_climatology`), computed once and
 passed in by the caller — exactly as stage 01 does — rather than refit per
 fold, so every model, every config, the winner, and the baseline all share one
 anomaly definition and are directly comparable.

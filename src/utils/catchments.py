@@ -148,9 +148,11 @@ SHARED = {
         (151, 215, '151-215d'),
     ],
     'daily_clim_window': 31,
-    # First year of the DOY discharge climatology, shared by every catchment.
-    # Set to the first year of the SEAS5 archive (see config.toml,
-    # [seas5_download] first_year = 1981) so the climatology
+    # First HYDRO year of the DOY discharge climatology, shared by every
+    # catchment (HY1981 = 1 Oct 1980 - 30 Sep 1981; utils.climatology selects
+    # every year by hydro year). Set to the first year of the SEAS5 archive
+    # (see config.toml, [seas5_download] first_year = 1981; the first
+    # verification dates, Jan 1981, fall in HY1981) so the climatology
     # describes the same era the models are scored in.
     #
     # Deliberately global, NOT per-catchment: the climatology must mean the

@@ -17,7 +17,9 @@ import time
 import numpy as np
 import pandas as pd
 
+from .climatology import eligible_hydro_years
 from .cv import make_folds
+from .data import hydro_year_of
 from .evaluate import score_frame
 
 
@@ -58,11 +60,13 @@ def estimate_phi(anomaly_series: pd.Series) -> float:
 def anomaly_record(obs_daily_q: pd.Series, doy_clim: dict,
                    skip_years: set, *, start_year: int) -> pd.Series:
     """
-    Observed log1p(Q) anomaly series (skip_years excluded), restricted to
-    calendar years from `start_year` onward.
+    Observed log1p(Q) anomaly series over the hydro years a climatology may
+    use: hydro years from `start_year` onward, skip_years excluded (see
+    utils.climatology.eligible_hydro_years).
     """
-    keep = obs_daily_q[(~obs_daily_q.index.year.isin(skip_years))
-                       & (obs_daily_q.index.year >= start_year)]
+    years = eligible_hydro_years(obs_daily_q, skip_years,
+                                 start_year=start_year)
+    keep = obs_daily_q[np.isin(hydro_year_of(obs_daily_q.index), list(years))]
     doy = keep.index.dayofyear
     clim = pd.Series([doy_clim.get(d, np.nan) for d in doy], index=keep.index)
     return np.log1p(keep) - clim

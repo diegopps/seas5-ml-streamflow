@@ -44,7 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/, for utils
 
 from utils.catchments import CATCHMENTS, SHARED
 from utils.data import load_obs_discharge, build_analysis_frame
-from utils.climatology import compute_global_climatology
+from utils.climatology import compute_climatology
 from utils.io_results import results_dir, build_summary, write_outputs
 from utils.paths import PROCESSED_DIR
 from utils.tabular import run_tabular_model
@@ -181,7 +181,7 @@ def main():
     # ── Load data and the single global climatology ──────────────────
     obs_daily_q = load_obs_discharge(cfg['discharge_csv'])
     df, unique_years = build_analysis_frame(in_path, obs_daily_q, skip_years)
-    doy_clim = compute_global_climatology(obs_daily_q, skip_years, CLIM_WINDOW,
+    doy_clim = compute_climatology(obs_daily_q, skip_years, CLIM_WINDOW,
                                           start_year=CLIM_START_YEAR)
 
     print(f"  Rows: {len(df):,} | Hydro years: {len(unique_years)} "

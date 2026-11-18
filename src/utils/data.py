@@ -7,9 +7,20 @@ merged with the observed target Q, missing-Q rows dropped, and skip_years
 removed.
 """
 
+import numpy as np
 import pandas as pd
 
 GROUP_COL = 'hydro_year'
+
+
+def hydro_year_of(dates) -> np.ndarray:
+    """
+    Hydro year of each date. A hydro year runs 1 Oct - 30 Sep and is named
+    by the calendar year it ends in (1 Oct 2004 - 30 Sep 2005 is 2005).
+    Same convention as the `hydro_year` column written by preprocessing.
+    """
+    dates = pd.DatetimeIndex(dates)
+    return np.asarray(dates.year) + (np.asarray(dates.month) >= 10)
 
 
 def load_obs_discharge(discharge_csv: str) -> pd.Series:

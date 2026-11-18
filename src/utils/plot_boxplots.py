@@ -175,16 +175,17 @@ def window_crpss(catchment: str, lo: int, hi: int, min_rows=30) -> dict:
 @lru_cache(maxsize=None)
 def _climatology_period_obs(catchment: str) -> pd.Series:
     """Observed discharge over the years the climatology is fitted on:
-    calendar years from clim_start_year onward, skip_years excluded."""
+    hydro years from clim_start_year onward, skip_years excluded."""
     # Imported here, not at module level: the plotting modules otherwise
     # receive their configuration from the calling driver.
     from .catchments import CATCHMENTS, SHARED
-    from .data import load_obs_discharge
+    from .climatology import eligible_hydro_years
+    from .data import load_obs_discharge, hydro_year_of
     cfg = CATCHMENTS[catchment]
     obs = load_obs_discharge(cfg['discharge_csv'])
-    keep = ((obs.index.year >= SHARED['clim_start_year'])
-            & ~obs.index.year.isin(cfg['skip_years']))
-    return obs[keep]
+    years = eligible_hydro_years(obs, cfg['skip_years'],
+                                 start_year=SHARED['clim_start_year'])
+    return obs[np.isin(hydro_year_of(obs.index), list(years))]
 
 
 @lru_cache(maxsize=None)
@@ -205,8 +206,9 @@ def doy_reference_acc(catchment: str, lo: int, hi: int, min_rows=30):
     scaffold = pl.load_predictions(catchment, DOY_REF_SCAFFOLD)
     if scaffold is None:
         return None
+    from .data import hydro_year_of
     obs = _climatology_period_obs(catchment)
-    obs_hy = obs.index.year + (obs.index.month >= 10).astype(int)
+    obs_hy = hydro_year_of(obs.index)
 
     sub = (scaffold[(scaffold['lead_day'] >= lo) & (scaffold['lead_day'] <= hi)]
              .dropna(subset=['Q_raw', 'Q_clim']))
