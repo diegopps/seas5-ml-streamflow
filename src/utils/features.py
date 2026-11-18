@@ -3,10 +3,15 @@ utils.features – Feature definitions and flat-table assembly.
 
 The dynamic predictors are the seven catchment-averaged meteorological
 variables, the two seasonal-cycle encodings, and the antecedent discharge
-anomaly at initialisation (a0, baked into the parquet by
-00_preprocess_catchment.py). For the tabular models these are flattened,
+anomaly at initialisation (a0). For the tabular models these are flattened,
 together with lead_day, into one row per forecast timestep per ensemble
 member.
+
+a0 is not stored in the feature parquet, because it depends on the
+climatology, which belongs to a fold. The parquet stores logq0 (observed
+log1p(Q) on the init date, written by 00_preprocess_catchment.py), and
+`set_a0` forms a0 = logq0 - climatology(day of year of init_date) against
+the climatology the caller passes in.
 """
 
 import numpy as np
@@ -21,6 +26,30 @@ DYN_VARS = ['tas', 'tasmax', 'tasmin', 'ssrd', 'tp', 'sd', 'sf',
 
 # Tabular feature set adds lead_day to the dynamic predictors.
 TABULAR_FEATURES = DYN_VARS + ['lead_day']
+
+
+def set_a0(df: pd.DataFrame, doy_clim: dict) -> pd.DataFrame:
+    """
+    Write the antecedent anomaly column `a0` = logq0 - doy_clim[doy(init_date)]
+    into `df`, IN PLACE (any existing a0 is overwritten), and return `df`.
+
+    `doy_clim` must be the climatology of the fold being trained or scored,
+    so a0 and the target share one anomaly definition. In place on purpose:
+    the analysis frame is large and every fold rewrites the column before
+    use, so no stale a0 from another fold survives a call.
+    """
+    if 'logq0' not in df.columns:
+        raise KeyError(
+            "feature frame has no 'logq0' column -- it was written by an older "
+            "00_preprocess_catchment.py (which stored a0). Rerun stage 00.")
+    init_clim = df['init_date'].dt.dayofyear.map(doy_clim)
+    a0 = df['logq0'] - init_clim
+    if not np.isfinite(a0.values).all():
+        raise ValueError(f"{int((~np.isfinite(a0.values)).sum())} non-finite "
+                         f"a0 value(s): logq0 or the climatology is missing "
+                         f"for some init dates.")
+    df['a0'] = a0.values
+    return df
 
 
 def build_flat_table(df: pd.DataFrame, doy_clim: dict) -> pd.DataFrame:

@@ -17,15 +17,20 @@ Output: data/processed_data/<catchment_id>_features.parquet
 Schema (one row per date × init_date × member):
     date, init_date, member, lead_day, source,
     hydro_year, init_month,
-    a0,                                        ← observed log1p(Q) anomaly at init_date
+    logq0,                                     ← observed log1p(Q) at init_date
     tas, tasmax, tasmin, ssrd, tp, sd, sf,   ← catchment-averaged met vars
     sin_doy, cos_doy,                         ← seasonal cycle
     Q                                         ← observed discharge (target, NaN for future dates)
 
+The antecedent anomaly a0 is NOT stored: it depends on the climatology, which
+is fit per cross-validation fold on that fold's training years. Each stage
+computes it at runtime as logq0 minus the fold's climatology on the init date
+(utils.features.set_a0). This script therefore needs no climatology.
+
 Rows whose init_date has no observed discharge, or whose init_date falls in the
 catchment's skip_years, are dropped before writing — every row therefore has a
-finite, trustworthy a0 (see utils.climatology.compute_climatology
-and the skip_years comment in src/utils/catchments.py).
+finite, trustworthy logq0 (see the skip_years comment in
+src/utils/catchments.py).
 
 Units:
     tas, tasmax, tasmin: K (instantaneous / true daily extremes, mx2t24/mn2t24)
@@ -54,8 +59,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/, for utils
 
 from utils.catchments import CATCHMENTS, SHARED
-from utils.climatology import compute_climatology
-from utils.data import build_analysis_frame
+from utils.data import build_analysis_frame, hydro_year_of
 from utils.paths import PROCESSED_DIR
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -128,8 +132,6 @@ CATCH_LON_MIN, CATCH_LON_MAX = CFG['catch_lon']
 HINDCAST_DIR = CFG.get('hindcast_dir', SHARED['hindcast_dir'])
 FORECAST_DIR = CFG.get('forecast_dir', SHARED['forecast_dir'])
 SKIP_YEARS = CFG.get('skip_years', set())
-CLIM_WINDOW     = SHARED.get('daily_clim_window', 31)
-CLIM_START_YEAR = SHARED['clim_start_year']     # no .get() -- must be set
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -380,9 +382,8 @@ def main():
     df_all['sin_doy'] = np.sin(2 * np.pi * doy / 365.25)
     df_all['cos_doy'] = np.cos(2 * np.pi * doy / 365.25)
 
-    # Hydrological year (Oct 1 start)
-    df_all['hydro_year'] = df_all['date'].dt.year
-    df_all.loc[df_all['date'].dt.month >= 10, 'hydro_year'] += 1
+    # Hydrological year (Oct 1 start) of the verification date
+    df_all['hydro_year'] = hydro_year_of(df_all['date'])
 
     df_all['init_month'] = df_all['init_date'].dt.month
 
@@ -395,37 +396,30 @@ def main():
     print(f"  Rows with observed Q: {n_with_q:,} / {n_total:,} "
           f"({n_with_q/n_total*100:.1f}%)")
 
-    # Antecedent discharge anomaly (a0): the observed log1p(Q) anomaly at each
-    # row's init_date — the same quantity the persistence baselines carry
-    # forward, now available to every model as an input feature.
-    print("  Computing antecedent anomaly (a0)...")
+    # Observed log1p(Q) at each row's init_date (logq0). The antecedent
+    # anomaly a0 = logq0 - climatology(init doy) is formed at runtime against
+    # the fold's own climatology (utils.features.set_a0), so no climatology
+    # is fit here.
+    print("  Reading observed discharge at initialisation (logq0)...")
     obs_daily_q = q_df.set_index('date')['Q'].sort_index()
     n_hit = df_all['init_date'].isin(obs_daily_q.index).sum()
     if n_hit == 0:
         raise ValueError("No init_date matched the discharge index — "
                          "check date normalisation in load_discharge().")
 
-    doy_clim = compute_climatology(obs_daily_q, SKIP_YEARS, CLIM_WINDOW,
-                                          start_year=CLIM_START_YEAR)
-    print(f"  Global climatology: {CLIM_START_YEAR}+ minus skip_years "
-          f"({len(SKIP_YEARS)} skipped), {CLIM_WINDOW}-day smoothing")
-
     init_unique = pd.DataFrame({'init_date': df_all['init_date'].unique()})
-    init_doy = init_unique['init_date'].dt.dayofyear
-    init_clim = init_doy.map(doy_clim)
     q_at_init = obs_daily_q.reindex(init_unique['init_date'])
-    init_unique['a0'] = np.log1p(q_at_init.values) - init_clim.values
+    init_unique['logq0'] = np.log1p(q_at_init.values)
     df_all = df_all.merge(init_unique, on='init_date', how='left')
 
     # Drop rows whose initialisation is unobserved or falls in skip_years.
     # Both conditions are needed: hydro_year is derived from the VALID date,
     # not init_date, so a trajectory initialised inside a skip year can have
     # valid dates that fall outside it and would otherwise slip through the
-    # downstream hydro_year-based skip_years filter while still carrying an
-    # a0 read from the untrustworthy period.
-    init_hy = (df_all['init_date'].dt.year
-               + (df_all['init_date'].dt.month >= 10).astype(int))
-    ok_init = df_all['a0'].notna() & ~init_hy.isin(SKIP_YEARS)
+    # downstream hydro_year-based skip_years filter while still carrying a
+    # logq0 read from the untrustworthy period.
+    init_hy = pd.Series(hydro_year_of(df_all['init_date']), index=df_all.index)
+    ok_init = df_all['logq0'].notna() & ~init_hy.isin(SKIP_YEARS)
 
     n_before = len(df_all)
     df_all = df_all[ok_init].reset_index(drop=True)
@@ -435,7 +429,7 @@ def main():
 
     # Reorder columns cleanly
     meta_cols  = ['date', 'init_date', 'member', 'lead_day', 'source',
-                  'hydro_year', 'init_month', 'a0']
+                  'hydro_year', 'init_month', 'logq0']
     feat_cols  = OUTPUT_VARS + ['sin_doy', 'cos_doy']
     target_col = ['Q']
     df_all = df_all[meta_cols + feat_cols + target_col]

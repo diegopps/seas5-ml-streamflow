@@ -86,6 +86,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/, for utils
 from utils.catchments import CATCHMENTS, SHARED
 from utils.data import load_obs_discharge, build_analysis_frame
 from utils.climatology import compute_climatology
+from utils.features import set_a0
 from utils import hptuning as hp
 from utils import sensitivity as sens
 from utils.paths import PROCESSED_DIR, RESULTS_ROOT, TRAINED_DIR
@@ -286,7 +287,8 @@ def main():
     obs_daily_q = load_obs_discharge(cfg['discharge_csv'])
     df, unique_years = build_analysis_frame(in_path, obs_daily_q, skip_years)
     doy_clim = compute_climatology(obs_daily_q, skip_years, CLIM_WINDOW,
-                                          start_year=CLIM_START_YEAR)
+                                   start_year=CLIM_START_YEAR)
+    set_a0(df, doy_clim)    # a0 = logq0 - climatology on the init date
     print(f"  Rows: {len(df):,} | Hydro years: {len(unique_years)} "
           f"({min(unique_years)}-{max(unique_years)})")
     print(f"  Global climatology: {CLIM_START_YEAR}+ minus skip_years "
