@@ -34,8 +34,19 @@ year is it", and corrupting them would test something else entirely (whether
 the model knows the season), which is not the question. The antecedent anomaly
 (a0) is likewise never corrupted: it is the observed log1p(Q) anomaly at
 initialisation, not meteorological forcing. The corruption writes only
-MET_VARS, so a0 passes through untouched, and the test measures use of the
-forcing rather than use of the initial condition.
+MET_VARS, so logq0 passes through untouched, and both scenarios get the same
+a0 (formed from logq0 against the model's own climatology at prediction
+time); the test measures use of the forcing rather than use of the initial
+condition.
+
+Climatology
+-----------
+Every fitted model carries the climatology it was trained against
+(`fitted['doy_clim']`), fit on exactly its training years (the fold's
+non-test years; every year for the final model). Prediction reuses it for
+a0, the back-transform and Q_clim, so a model is never scored against a
+climatology that includes its test year, and a saved model needs nothing
+else to predict.
 
 Train once, infer twice
 -----------------------
@@ -74,7 +85,8 @@ from sklearn.ensemble import RandomForestRegressor
 
 from .cv import SEED
 from .evaluate import ensemble_mean, score_frame
-from .features import TABULAR_FEATURES, build_flat_table
+from .features import (TABULAR_FEATURES, build_flat_table, set_a0,
+                       apply_fold_climatology)
 from .metrics import crps_from_pred_df
 from . import estimators as est
 from . import lstm as lstm_mod
@@ -240,9 +252,12 @@ def build_estimator(model, config):
     raise ValueError(f"No tabular estimator defined for model '{model}'")
 
 
-def fit_tabular(model, df, *, doy_clim, config, fit_yrs):
-    """Fit one tabular model on `fit_yrs`. Returns a dict holding everything
-    inference needs, or None if the training fold is empty."""
+def fit_tabular(model, df, *, fit_clim, config, fit_yrs):
+    """Fit one tabular model on `fit_yrs`, against the climatology of those
+    years (`fit_clim`, a utils.climatology.ClimatologyFitter; a0 is written
+    into `df` in place). Returns a dict holding everything inference needs,
+    the climatology included, or None if the training fold is empty."""
+    doy_clim = apply_fold_climatology(df, fit_clim, fit_yrs)
     df_tr = df[df[GROUP_COL].isin(fit_yrs)]
     flat_tr = build_flat_table(df_tr, doy_clim)
     if len(flat_tr) == 0:
@@ -258,11 +273,14 @@ def fit_tabular(model, df, *, doy_clim, config, fit_yrs):
     estimator.fit(X_tr, y_tr)
 
     return {'kind': 'tabular', 'estimator': estimator, 'scaler': scaler,
-            'n_train_rows': len(flat_tr)}
+            'doy_clim': doy_clim, 'n_train_rows': len(flat_tr)}
 
 
-def predict_tabular(fitted, df_score, *, doy_clim):
-    """Run one tabular inference pass. Returns a per-member prediction frame."""
+def predict_tabular(fitted, df_score):
+    """Run one tabular inference pass against the model's own climatology.
+    Returns a per-member prediction frame."""
+    doy_clim = fitted['doy_clim']
+    df_score = set_a0(df_score.copy(), doy_clim)
     flat = build_flat_table(df_score, doy_clim)
     if len(flat) == 0:
         return None
@@ -278,9 +296,11 @@ def predict_tabular(fitted, df_score, *, doy_clim):
     return scored.rename(columns={'Q': 'Q_raw'})[PRED_COLS]
 
 
-def fit_lstm(df, *, doy_clim, config, tr_yrs, val_yrs, ckpt_path):
+def fit_lstm(df, *, fit_clim, config, tr_yrs, val_yrs, ckpt_path):
     """
-    Train the LSTM for one config, early-stopping on `val_yrs`.
+    Train the LSTM for one config, early-stopping on `val_yrs`, against the
+    climatology of tr_yrs | val_yrs (`fit_clim`, a
+    utils.climatology.ClimatologyFitter; a0 is written into `df` in place).
 
     Assembled from the same `utils.lstm` primitives stage 02 uses, but
     returning the trained model rather than a score, so the caller can run
@@ -290,6 +310,7 @@ def fit_lstm(df, *, doy_clim, config, tr_yrs, val_yrs, ckpt_path):
 
     if not (df[GROUP_COL].isin(tr_yrs).any() and df[GROUP_COL].isin(val_yrs).any()):
         return None
+    doy_clim = apply_fold_climatology(df, fit_clim, set(tr_yrs) | set(val_yrs))
 
     # Whole trajectories from the full frame; each call scores only its own
     # years (see lstm.build_trajectories).
@@ -344,11 +365,12 @@ def fit_lstm(df, *, doy_clim, config, tr_yrs, val_yrs, ckpt_path):
     arch = {'n_dyn': len(lstm_mod.DYN_VARS), 'hidden': config['hidden'],
             'n_layers': lstm_mod.N_LAYERS, 'dropout': lstm_mod.DROPOUT}
     return {'kind': 'lstm', 'model': model, 'dyn_scaler': dyn_sc, 'arch': arch,
+            'doy_clim': doy_clim,
             'best_epoch': best_epoch, 'best_val_loss': float(best_val_loss),
             'n_train_rows': len(tr_trajs)}
 
 
-def predict_lstm(fitted, df_score, *, doy_clim, score_years):
+def predict_lstm(fitted, df_score, *, score_years):
     """Run one LSTM inference pass. Returns a per-member prediction frame,
     for rows in `score_years` only; other rows of `df_score` are read as
     trajectory context.
@@ -356,7 +378,10 @@ def predict_lstm(fitted, df_score, *, doy_clim, score_years):
     The trajectory builder standardises the (corrupted) features with the
     training fold's scaler, exactly as at training time — corrupted inputs are
     deliberately NOT re-standardised to their own statistics, since a model
-    fed out-of-distribution values is precisely what this test measures."""
+    fed out-of-distribution values is precisely what this test measures.
+    a0, targets and Q_clim use the model's own climatology."""
+    doy_clim = fitted['doy_clim']
+    df_score = set_a0(df_score.copy(), doy_clim)
     trajs, _ = lstm_mod.build_trajectories(df_score, doy_clim,
                                            fitted['dyn_scaler'], False,
                                            score_years=score_years)
@@ -365,14 +390,15 @@ def predict_lstm(fitted, df_score, *, doy_clim, score_years):
     return lstm_mod.predict_trajectories(fitted['model'], trajs)
 
 
-def predict(fitted, df_score, *, doy_clim, score_years):
-    """Dispatch one inference pass to the right backend. Only rows in
-    `score_years` are predicted; tabular models need no context rows."""
+def predict(fitted, df_score, *, score_years):
+    """Dispatch one inference pass to the right backend, against the
+    model's own climatology (`fitted['doy_clim']`). Only rows in
+    `score_years` are predicted; tabular models need no context rows.
+    `df_score` is not modified."""
     if fitted['kind'] == 'lstm':
-        return predict_lstm(fitted, df_score, doy_clim=doy_clim,
-                            score_years=score_years)
+        return predict_lstm(fitted, df_score, score_years=score_years)
     df_score = df_score[df_score[GROUP_COL].isin(score_years)]
-    return predict_tabular(fitted, df_score, doy_clim=doy_clim)
+    return predict_tabular(fitted, df_score)
 
 
 def save_fitted(fitted, path, *, meta=None):
@@ -382,8 +408,10 @@ def save_fitted(fitted, path, *, meta=None):
     Everything inference needs travels with the weights: the tabular models
     carry their fitted StandardScaler, the LSTM its dynamic-feature scaler and
     the architecture arguments needed to rebuild the module before loading the
-    state dict. Without those, saved weights are not enough to reproduce a
-    prediction — the scalers are fitted objects, not derivable from the config.
+    state dict. Both also carry the DOY climatology they were trained against
+    (a0, back-transform and Q_clim at prediction). Without those, saved
+    weights are not enough to reproduce a prediction — the scalers and the
+    climatology are fitted objects, not derivable from the config.
 
     `meta` is free-form provenance (catchment, config label, training years)
     stored alongside, so a saved model can always be traced back to the run
@@ -391,7 +419,8 @@ def save_fitted(fitted, path, *, meta=None):
     """
     import joblib
 
-    payload = {'kind': fitted['kind'], 'meta': meta or {}}
+    payload = {'kind': fitted['kind'], 'meta': meta or {},
+               'doy_clim': fitted['doy_clim']}
 
     if fitted['kind'] == 'lstm':
         payload['state_dict'] = {k: v.cpu() for k, v
@@ -426,12 +455,14 @@ def load_fitted(path):
         model.eval()
         return {'kind': 'lstm', 'model': model,
                 'dyn_scaler': payload['dyn_scaler'],
+                'doy_clim': payload['doy_clim'],
                 'best_epoch': payload.get('best_epoch'),
                 'meta': payload.get('meta', {})}
 
     payload = joblib.load(path)
     return {'kind': 'tabular', 'estimator': payload['estimator'],
-            'scaler': payload['scaler'], 'meta': payload.get('meta', {})}
+            'scaler': payload['scaler'], 'doy_clim': payload['doy_clim'],
+            'meta': payload.get('meta', {})}
 
 
 def score_predictions(pred_df, test_year):

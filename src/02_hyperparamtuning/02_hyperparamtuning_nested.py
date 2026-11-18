@@ -29,17 +29,20 @@ outer fold the script:
      draws a fresh early-stopping split — and saves one full retrain per fold.
      Stage 01 must therefore have been run before this stage.
 
-Every model, every config, the winner, and the baseline share one single
-global DOY climatology per catchment (fit once on the observed record
-from clim_start_year (1981) onward, minus skip_years, exactly as stage 01 does) rather than a climatology refit
-per fold, so ACC values are comparable both within this stage and against
-stage 01.
+The DOY climatology (and with it the antecedent anomaly a0) is fit per
+training run on that run's training years only (utils.hptuning
+.train_climatology): an inner fold on its inner-training years, the winner
+retrain on all outer-training years. The outer retrain therefore uses the
+same climatology as stage 01's fold for this year (both fit on every year
+but the outer-test year), so the tuned and untuned scores share a reference.
 
 Correctness invariants:
   - The inner-holdout year is used ONLY to score a config for selection; it is
     never in that inner training run or its early-stopping split.
   - The outer-test year is never touched during inner CV or any retrain's
     early-stopping split — only for the final score.
+  - Neither the inner-holdout year nor the outer-test year enters the
+    climatology (or a0) of a run that scores it.
 
 Model families, their config grids, baselines, and train/score functions are
 defined in `utils/hptuning.py`. One Slurm job runs one (catchment,
@@ -82,8 +85,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/, for utils
 
 from utils.catchments import CATCHMENTS, SHARED
 from utils.data import load_obs_discharge, build_analysis_frame
-from utils.climatology import compute_climatology
-from utils.features import set_a0
+from utils.climatology import ClimatologyFitter
 from utils.evaluate import ensemble_mean
 from utils.io_results import MEMBER_COLS
 from utils.io_results import results_dir as stage01_results_dir
@@ -168,7 +170,7 @@ def stage01_baseline_row(catchment_id, model, outer_hy, baseline_label):
     }
 
 
-def run_outer_fold(*, df, obs_daily_q, doy_clim, unique_years, outer_hy, model,
+def run_outer_fold(*, df, obs_daily_q, fit_clim, unique_years, outer_hy, model,
                    configs, baseline_hp, train_and_score, root_dir,
                    catchment_id):
     """
@@ -206,7 +208,7 @@ def run_outer_fold(*, df, obs_daily_q, doy_clim, unique_years, outer_hy, model,
             ckpt = os.path.join(
                 ckpt_dir, f's{SEED}_o{outer_hy}_i{inner_idx}_c{cfg_idx}.pt')
             m, _ = train_and_score(
-                df, obs_daily_q, doy_clim=doy_clim, hp=config,
+                df, obs_daily_q, fit_clim=fit_clim, hp=config,
                 tr_yrs=tr_yrs, val_yrs=val_yrs,
                 score_yrs=inner_holdout, ckpt_path=ckpt)
             if os.path.exists(ckpt):
@@ -269,7 +271,7 @@ def run_outer_fold(*, df, obs_daily_q, doy_clim, unique_years, outer_hy, model,
                                  seed=SEED))
     ckpt = os.path.join(ckpt_dir, f's{SEED}_o{outer_hy}_WINNER_c{winner_idx}.pt')
     m_winner, pred_df = train_and_score(
-        df, obs_daily_q, doy_clim=doy_clim, hp=winner_hp,
+        df, obs_daily_q, fit_clim=fit_clim, hp=winner_hp,
         tr_yrs=tr_yrs, val_yrs=val_yrs,
         score_yrs={outer_hy}, ckpt_path=ckpt)
     if os.path.exists(ckpt):
@@ -352,16 +354,15 @@ def main():
         print(f"  device={hp.lstm_mod.DEVICE}, AMP={hp.lstm_mod.USE_AMP}")
     print("=" * 60)
 
-    # ── 1. Load data and the single global climatology ───────────────
+    # ── 1. Load data; the climatology (and a0) is fit per training run ─
     print("\n[1/4] Loading data...")
     obs_daily_q = load_obs_discharge(cfg['discharge_csv'])
     df, unique_years = build_analysis_frame(in_path, obs_daily_q, skip_years)
-    doy_clim = compute_climatology(obs_daily_q, skip_years, CLIM_WINDOW,
-                                   start_year=CLIM_START_YEAR)
-    set_a0(df, doy_clim)    # a0 = logq0 - climatology on the init date
-    print(f"  Global climatology: {CLIM_START_YEAR}+ minus skip_years "
-          f"({len(skip_years)} skipped), {CLIM_WINDOW}-day smoothing "
-          f"— identical to stage 01's")
+    fit_clim = ClimatologyFitter(obs_daily_q, skip_years, CLIM_WINDOW,
+                                 start_year=CLIM_START_YEAR)
+    print(f"  Climatology: per training run, on its training hydro years "
+          f"from HY{CLIM_START_YEAR} minus skip_years ({len(skip_years)} "
+          f"skipped), {CLIM_WINDOW}-day smoothing")
 
     if outer_hy not in unique_years:
         print(f"ERROR: OUTER_HY={outer_hy} not among this catchment's hydro "
@@ -374,7 +375,7 @@ def main():
 
     # ── 2-4. Inner CV, winner selection, winner retrain ──────────────
     m_winner = run_outer_fold(
-        df=df, obs_daily_q=obs_daily_q, doy_clim=doy_clim,
+        df=df, obs_daily_q=obs_daily_q, fit_clim=fit_clim,
         unique_years=unique_years, outer_hy=outer_hy, model=model,
         configs=configs, baseline_hp=baseline_hp,
         train_and_score=train_and_score, root_dir=root_dir,

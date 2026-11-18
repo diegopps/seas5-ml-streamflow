@@ -15,9 +15,9 @@ same default configs on the same split, so its per-fold row already is the
 untuned baseline, and reusing it keeps every consumer (the metrics file and
 the tuning figure alike) on one identical set of numbers. BASELINE_CONFIG
 below therefore documents which config that reference corresponds to; it is
-recorded in the outputs rather than trained here. Both stages use the same
-single global climatology, so ACC values are comparable across stages, not
-just within this one.
+recorded in the outputs rather than trained here. Both stages fit the outer
+fold's climatology on the same years (every year but the outer-test year),
+so their ACC values for a given year are scored against the same reference.
 
 The families tuned here are the ones whose hyperparameters are otherwise fixed
 by hand: `lstm`, `rf`, and `xgb`. Ridge is not among them — RidgeCV selects its
@@ -30,16 +30,16 @@ Every model family is keyed by name in `CONFIGS`, `BASELINE_CONFIG`, and
 means adding a config grid, a baseline, and a train/score function here.
 
 Each family's train/score function shares one signature — (df, obs_daily_q,
-doy_clim, hp, tr_yrs, val_yrs, score_yrs, ckpt_path) -> (metrics, pred_df) —
+fit_clim, hp, tr_yrs, val_yrs, score_yrs, ckpt_path) -> (metrics, pred_df) —
 even where an argument does not apply. The LSTM early-stops on `val_yrs` and
 checkpoints to `ckpt_path`; the tabular models do neither, so they fold
 `val_yrs` back into training and ignore `ckpt_path`.
 
-`doy_clim` is the single global climatology for the catchment (see
-`utils.climatology.compute_climatology`), computed once and
-passed in by the caller — exactly as stage 01 does — rather than refit per
-fold, so every model, every config, the winner, and the baseline all share one
-anomaly definition and are directly comparable.
+`fit_clim` is the catchment's `utils.climatology.ClimatologyFitter`. Each
+train/score call fits its own climatology (and writes its own a0) on exactly
+the years it trains on, tr_yrs | val_yrs (`train_climatology`): the
+inner-training years for an inner fold, all non-test years for the outer
+retrain. The scored years (inner holdout, outer test year) never enter it.
 """
 
 import numpy as np
@@ -49,7 +49,7 @@ from sklearn.ensemble import RandomForestRegressor
 
 from .cv import SEED, VAL_FRAC
 from .evaluate import ensemble_mean, score_frame
-from .features import TABULAR_FEATURES, build_flat_table
+from .features import TABULAR_FEATURES, build_flat_table, apply_fold_climatology
 from .metrics import crps_from_pred_df
 from . import estimators as est
 from . import lstm as lstm_mod
@@ -220,16 +220,25 @@ def inner_partition(outer_train_years, *, n_inner, seed):
     return [b for b in buckets if b]
 
 
-def train_and_score_lstm(df, obs_daily_q, *, doy_clim, hp, tr_yrs, val_yrs,
+def train_climatology(df, fit_clim, tr_yrs, val_yrs):
+    """The run's climatology, fit on every year it trains on (tr_yrs |
+    val_yrs: early-stopping years count as training), with the run's a0
+    written into `df` in place. Never includes the scored years."""
+    return apply_fold_climatology(df, fit_clim, set(tr_yrs) | set(val_yrs))
+
+
+def train_and_score_lstm(df, obs_daily_q, *, fit_clim, hp, tr_yrs, val_yrs,
                          score_yrs, ckpt_path):
     """
     Train the LSTM for hyperparameter config `hp` on `tr_yrs` (with `val_yrs`
     reserved for early stopping) and score it on `score_yrs` (one or more
-    held-out hydro years), against the shared global `doy_clim`. Returns
-    (metrics_dict, pred_df), or (None, None) if `score_yrs` has no data.
+    held-out hydro years), against the climatology of tr_yrs | val_yrs
+    (`train_climatology`). Returns (metrics_dict, pred_df), or (None, None)
+    if `score_yrs` has no data.
     """
     if not df[GROUP_COL].isin(score_yrs).any():
         return None, None
+    doy_clim = train_climatology(df, fit_clim, tr_yrs, val_yrs)
 
     # Whole trajectories from the full frame; each call scores only its own
     # years (see lstm.build_trajectories).
@@ -332,13 +341,14 @@ def train_and_score_tabular(model):
     models do not early-stop, so `val_yrs` is folded back into the training
     years and `ckpt_path` is unused.
     """
-    def _run(df, obs_daily_q, *, doy_clim, hp, tr_yrs, val_yrs, score_yrs,
+    def _run(df, obs_daily_q, *, fit_clim, hp, tr_yrs, val_yrs, score_yrs,
             ckpt_path=None):
         fit_yrs = set(tr_yrs) | set(val_yrs)
+        if not df[GROUP_COL].isin(score_yrs).any():
+            return None, None
+        doy_clim = train_climatology(df, fit_clim, tr_yrs, val_yrs)
         df_tr = df[df[GROUP_COL].isin(fit_yrs)]
         df_score = df[df[GROUP_COL].isin(score_yrs)]
-        if len(df_score) == 0:
-            return None, None
 
         flat_tr = build_flat_table(df_tr, doy_clim)
         flat_score = build_flat_table(df_score, doy_clim)

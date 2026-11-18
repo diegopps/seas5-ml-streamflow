@@ -66,8 +66,15 @@ The final model
     out: it is never scored, so there is nothing to hold out for. The fold
     models above answer "how well does this config generalise"; this one is
     simply that config fitted to the whole record, saved with its provenance
-    (catchment, config, seed, training years) so it can be reloaded without
-    retraining via utils.sensitivity.load_fitted.
+    (catchment, config, seed, training years) and its climatology (fit on
+    every year) so it can be reloaded without retraining via
+    utils.sensitivity.load_fitted.
+
+Climatology
+    Each fold model is trained against a climatology (and a0) fit on that
+    fold's non-test years only, and is scored against the same climatology
+    in both scenarios (see utils.sensitivity, "Climatology"). For a given
+    year this is the same climatology as stage 01's and stage 02's fold.
 """
 
 import os
@@ -85,8 +92,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/, for utils
 
 from utils.catchments import CATCHMENTS, SHARED
 from utils.data import load_obs_discharge, build_analysis_frame
-from utils.climatology import compute_climatology
-from utils.features import set_a0
+from utils.climatology import ClimatologyFitter
 from utils import hptuning as hp
 from utils import sensitivity as sens
 from utils.paths import PROCESSED_DIR, RESULTS_ROOT, TRAINED_DIR
@@ -189,14 +195,15 @@ def fold_plan(catchment_id, model, unique_years):
     return [(y, config) for y in unique_years]
 
 
-def fit_for_fold(model, config, *, df, doy_clim, unique_years, test_year,
+def fit_for_fold(model, config, *, df, fit_clim, unique_years, test_year,
                  ckpt_path):
-    """Train the fold's single model, shared by both scenarios."""
+    """Train the fold's single model, shared by both scenarios, against the
+    climatology of the fold's non-test years (carried in the result)."""
     outer_train_years = [y for y in unique_years if y != test_year]
 
     if model != 'lstm':
         # Tabular families do not early-stop, so every non-test year trains.
-        return sens.fit_tabular(model, df, doy_clim=doy_clim, config=config,
+        return sens.fit_tabular(model, df, fit_clim=fit_clim, config=config,
                                 fit_yrs=set(outer_train_years))
 
     # Reproduce stage 02's winner-retrain split exactly, so this is the same
@@ -207,11 +214,11 @@ def fit_for_fold(model, config, *, df, doy_clim, unique_years, test_year,
         outer_train_years,
         val_seed=hp.val_seed_for(outer_idx, hp.INNER_IDX_RETRAIN, winner_idx,
                                  seed=SEED))
-    return sens.fit_lstm(df, doy_clim=doy_clim, config=config,
+    return sens.fit_lstm(df, fit_clim=fit_clim, config=config,
                          tr_yrs=tr_yrs, val_yrs=val_yrs, ckpt_path=ckpt_path)
 
 
-def fit_final_model(model, config, *, df, doy_clim, unique_years, ckpt_path):
+def fit_final_model(model, config, *, df, fit_clim, unique_years, ckpt_path):
     """
     Train the catchment's final model on EVERY hydro year.
 
@@ -227,14 +234,14 @@ def fit_final_model(model, config, *, df, doy_clim, unique_years, ckpt_path):
     no such requirement and fit every year directly.
     """
     if model != 'lstm':
-        return sens.fit_tabular(model, df, doy_clim=doy_clim, config=config,
+        return sens.fit_tabular(model, df, fit_clim=fit_clim, config=config,
                                 fit_yrs=set(unique_years))
 
     tr_yrs, val_yrs = hp.make_val_split(
         unique_years,
         val_seed=int(np.random.SeedSequence(
             [SEED, FINAL_FIT_SALT]).generate_state(1)[0]))
-    return sens.fit_lstm(df, doy_clim=doy_clim, config=config,
+    return sens.fit_lstm(df, fit_clim=fit_clim, config=config,
                          tr_yrs=tr_yrs, val_yrs=val_yrs, ckpt_path=ckpt_path)
 
 
@@ -282,17 +289,17 @@ def main():
         print(f"  device={sens.lstm_mod.DEVICE}, AMP={sens.lstm_mod.USE_AMP}")
     print("=" * 70)
 
-    # ── 1. Data and the shared global climatology ────────────────────
+    # ── 1. Data; the climatology (and a0) is fit per fold ────────────
     print("\n[1/4] Loading data...")
     obs_daily_q = load_obs_discharge(cfg['discharge_csv'])
     df, unique_years = build_analysis_frame(in_path, obs_daily_q, skip_years)
-    doy_clim = compute_climatology(obs_daily_q, skip_years, CLIM_WINDOW,
-                                   start_year=CLIM_START_YEAR)
-    set_a0(df, doy_clim)    # a0 = logq0 - climatology on the init date
+    fit_clim = ClimatologyFitter(obs_daily_q, skip_years, CLIM_WINDOW,
+                                 start_year=CLIM_START_YEAR)
     print(f"  Rows: {len(df):,} | Hydro years: {len(unique_years)} "
           f"({min(unique_years)}-{max(unique_years)})")
-    print(f"  Global climatology: {CLIM_START_YEAR}+ minus skip_years "
-          f"({len(skip_years)} skipped), {CLIM_WINDOW}-day smoothing")
+    print(f"  Climatology: per fold, on its training hydro years from HY"
+          f"{CLIM_START_YEAR} minus skip_years ({len(skip_years)} skipped), "
+          f"{CLIM_WINDOW}-day smoothing")
 
     # ── 2. Fold plan ─────────────────────────────────────────────────
     print("\n[2/4] Resolving folds...")
@@ -342,7 +349,7 @@ def main():
                   f"match); {n_rows:,} retained")
 
         ckpt = os.path.join(ckpt_dir, f'fold{test_year}.pt')
-        fitted = fit_for_fold(model, config, df=df, doy_clim=doy_clim,
+        fitted = fit_for_fold(model, config, df=df, fit_clim=fit_clim,
                               unique_years=unique_years, test_year=test_year,
                               ckpt_path=ckpt)
         if os.path.exists(ckpt):
@@ -353,7 +360,8 @@ def main():
             continue
 
         for scenario in sens.SCENARIOS:
-            pred_df = sens.predict(fitted, frames[scenario], doy_clim=doy_clim,
+            # Scored against the model's own (fold) climatology.
+            pred_df = sens.predict(fitted, frames[scenario],
                                    score_years=[test_year])
             scores = sens.score_predictions(pred_df, test_year)
             if scores is None:
@@ -408,7 +416,7 @@ def main():
     final_t0 = time.time()
     final_ckpt = os.path.join(ckpt_dir, 'final.pt')
     final_fitted = fit_final_model(model, final_config, df=df,
-                                   doy_clim=doy_clim,
+                                   fit_clim=fit_clim,
                                    unique_years=unique_years,
                                    ckpt_path=final_ckpt)
     if os.path.exists(final_ckpt):
