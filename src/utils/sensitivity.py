@@ -59,11 +59,11 @@ weights held fixed.
 
 Which hyperparameters
 ---------------------
-rf, xgb, and lstm each use ONE config per catchment: whichever config won the
-most outer folds in stage 02's nested search (the 'best' column of
-03_configranking.pdf/.csv), applied to every fold here. This tests the single
-config that would actually be deployed for the catchment, rather than a
-different per-fold winner. Ridge has no stage-02 search (RidgeCV selects its
+rf, xgb, and lstm use, in each fold, that fold's own stage-02 winner (the
+config chosen by the inner CV of the stage-02 outer fold for the same test
+year), so the test year played no part in choosing it. The catchment-wide
+winner (most outer-fold wins) is used only for the final all-years model,
+which is never scored. Ridge has no stage-02 search (RidgeCV selects its
 own regularisation by internal generalised cross-validation) and uses its
 stage-01 definition.
 

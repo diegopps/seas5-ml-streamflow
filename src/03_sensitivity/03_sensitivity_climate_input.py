@@ -25,12 +25,17 @@ values it had never seen". A donor year is in-distribution by construction, so
 a drop can only mean the model was using *this* year's weather.
 
 Models and hyperparameters
-    rf, xgb, lstm   one fixed config per catchment: whichever config won the
-                    most outer folds in stage 02's nested search (the 'best'
-                    column of 03_configranking.pdf/.csv), applied to every
-                    fold here. This tests the one config that would actually
-                    be deployed for the catchment, not a different winner per
-                    fold.
+    rf, xgb, lstm   each fold uses ITS OWN stage-02 winner: the config chosen
+                    by the inner CV of the stage-02 outer fold for the same
+                    test year (outer_<Y>/winner.csv). That choice never saw
+                    year Y. The catchment-wide winner (most outer-fold wins)
+                    would not do: every other outer fold's inner CV scored
+                    configs on Y, so its votes were cast partly on the year
+                    being tested. With the per-fold winner, the normal
+                    scenario reproduces the model stage 02 reported for Y
+                    (same config; for the LSTM also the same train/val split).
+                    Stage 02 must be complete: a year without winner.csv is an
+                    error.
     ridge           its stage-01 definition (RidgeCV selects its own alpha by
                     internal generalised cross-validation, which is why it is
                     not part of the stage-02 search). Runs on every fold.
@@ -62,10 +67,12 @@ Output:
 
 The final model
     After the fold loop, one last model is fitted on EVERY hydro year using the
-    catchment-wide winner config and saved to data/trained_models/. No year is held
-    out: it is never scored, so there is nothing to hold out for. The fold
-    models above answer "how well does this config generalise"; this one is
-    simply that config fitted to the whole record, saved with its provenance
+    catchment-wide winner config (most stage-02 outer-fold wins, the 'best' of
+    03_configranking.pdf/.csv) and saved to data/trained_models/. No year is
+    held out: it is never scored, so there is nothing to hold out for, and
+    the votes of all outer folds can be pooled. The fold models above answer
+    "how well does the tuned model generalise"; this one is the catchment's
+    deployable model fitted to the whole record, saved with its provenance
     (catchment, config, seed, training years) and its climatology (fit on
     every year) so it can be reloaded without retraining via
     utils.sensitivity.load_fitted.
@@ -140,13 +147,16 @@ def hptune_root(catchment_id, model):
 
 def load_catchment_winner_config(catchment_id, model):
     """
-    The single config used for every fold: whichever config won the most
-    outer folds in stage 02's nested search — the same 'best' reported in
+    The config for the FINAL all-years model only: whichever config won the
+    most outer folds in stage 02's nested search — the same 'best' reported in
     03_configranking.pdf/.csv. Ties are broken the same way: counts are
     sorted by config label before idxmax, so the alphabetically first of the
-    tied configs wins, as in plot_configrank. Unlike a per-fold winner, this
-    is one fixed hyperparameter set applied across the whole catchment, so the fold loop
-    below tests one deployed model rather than a different one per fold.
+    tied configs wins, as in plot_configrank.
+
+    Not used for the scored folds: for a test year Y, every other outer
+    fold's inner CV scored configs on Y, so this pooled choice is partly
+    selected on Y (see `load_fold_winner_config`). The final model is never
+    scored, so pooling is fine there.
     """
     configs = hp.CONFIGS[model]
     by_label = {c['label']: c for c in configs}
@@ -173,26 +183,53 @@ def load_catchment_winner_config(catchment_id, model):
     return by_label[best_label]
 
 
+def load_fold_winner_config(catchment_id, model, outer_hy):
+    """
+    The config stage 02 selected for outer fold `outer_hy`
+    (outer_<outer_hy>/winner.csv): chosen by inner CV over that fold's
+    outer-training years only, so year `outer_hy` played no part in it.
+    Returns None if the file is missing or empty; raises if it names a config
+    that is not in the grid.
+    """
+    path = os.path.join(hptune_root(catchment_id, model), f"outer_{outer_hy}",
+                        "winner.csv")
+    if not os.path.exists(path):
+        return None
+    w = pd.read_csv(path)
+    if len(w) == 0:
+        return None
+    label = str(w['winner_config'].iloc[0])
+    by_label = {c['label']: c for c in hp.CONFIGS[model]}
+    if label not in by_label:
+        raise ValueError(f"{path} names config '{label}', which is not in the "
+                         f"{model} grid.")
+    return by_label[label]
+
+
 def fold_plan(catchment_id, model, unique_years):
     """
     Which folds to run, and with which config.
 
-    Tuned families use ONE config for every fold: the catchment-wide stage-02
-    winner (most outer-fold wins overall, i.e. 03_configranking.pdf's 'best'),
-    not each fold's own inner-CV winner. Ridge has no search, so it runs every
-    year with config None.
+    Tuned families use each fold's OWN stage-02 winner
+    (`load_fold_winner_config`), never the catchment-wide one, whose votes
+    come partly from inner CV that scored configs on the test year. Every
+    year must have a stage-02 winner; missing ones are listed and the run
+    stops. Ridge has no search, so it runs every year with config None.
     """
     if model not in TUNED_MODELS:
         return [(y, None) for y in unique_years]
 
-    config = load_catchment_winner_config(catchment_id, model)
-    if config is None:
-        print(f"ERROR: no stage-02 winners found under "
-              f"{hptune_root(catchment_id, model)}\n"
+    plan = [(y, load_fold_winner_config(catchment_id, model, y))
+            for y in unique_years]
+    missing = [y for y, c in plan if c is None]
+    if missing:
+        print(f"ERROR: no stage-02 winner.csv for {len(missing)} of "
+              f"{len(plan)} years under {hptune_root(catchment_id, model)}:\n"
+              f"       {missing}\n"
               f"       Run 02_hyperparamtuning_nested.py for "
-              f"{catchment_id}/{model} first.")
+              f"{catchment_id}/{model} for those outer years first.")
         sys.exit(1)
-    return [(y, config) for y in unique_years]
+    return plan
 
 
 def fit_for_fold(model, config, *, df, fit_clim, unique_years, test_year,
@@ -226,6 +263,10 @@ def fit_final_model(model, config, *, df, fit_clim, unique_years, ckpt_path):
     score against and withholding one would only discard data. It is the model
     the pipeline ends on — the catchment-wide winner config fitted to the full
     record — and it is saved rather than scored.
+
+    `config` is the catchment-wide winner (`load_catchment_winner_config`),
+    not a per-fold one: nothing is scored here, so pooling all outer folds'
+    votes leaks nothing.
 
     The LSTM still needs a validation split for early stopping, so it reserves
     VAL_FRAC of the years under a dedicated seed. Those years are trained
@@ -308,9 +349,9 @@ def main():
         print("ERROR: no folds to run.")
         sys.exit(1)
     if model in TUNED_MODELS:
-        config_label = plan[0][1]['label']
-        print(f"  {len(plan)} folds, all using catchment-wide winner "
-              f"config {config_label}")
+        counts = pd.Series([c['label'] for _, c in plan]).value_counts()
+        print(f"  {len(plan)} folds, each using its own stage-02 winner: "
+              + ", ".join(f"{k} x{v}" for k, v in counts.sort_index().items()))
     else:
         print(f"  {len(plan)} folds (ridge runs every year; no stage-02 "
               f"search applies)")
@@ -412,7 +453,11 @@ def main():
 
     # ── 4. Final model: one fit on every year, saved not scored ──────
     print(f"\n[4/4] Training final model on all {len(unique_years)} years...")
-    final_config = plan[0][1]
+    final_config = (load_catchment_winner_config(catchment_id, model)
+                    if model in TUNED_MODELS else None)
+    if final_config is not None:
+        print(f"  catchment-wide winner (most stage-02 outer-fold wins): "
+              f"{final_config['label']}")
     final_t0 = time.time()
     final_ckpt = os.path.join(ckpt_dir, 'final.pt')
     final_fitted = fit_final_model(model, final_config, df=df,
