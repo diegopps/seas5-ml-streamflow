@@ -26,7 +26,7 @@ forcing.
 
 ## Quick start
 
-All steps run from the repository folder on a Slurm cluster. Each `submit_*`
+All commands run from the repository root on a Slurm cluster. Each `submit_*`
 command sends jobs to the queue; wait until they have finished
 (`squeue -u $USER` shows nothing left) before starting the next step.
 
@@ -43,16 +43,16 @@ conda env create -f environment.yml
 #    that activate the environment inside each job.
 
 # 4. Run the four stages, one after the other
-bash submit_00_preprocesscatchment.sh                  # build feature tables
-bash submit_01_exploration.sh all                      # Stage 1: all models, untuned
-bash submit_02_hyperparamtuning_nested.sh --model all all   # Stage 2: nested-CV tuning
-bash submit_03_sensitivity.sh --model all all          # Stage 3: forcing sensitivity
+bash src/00_preprocessing/submit_00_preprocesscatchment.sh                # build feature tables
+bash src/01_exploration/submit_01_exploration.sh all                      # Stage 1: all models, untuned
+bash src/02_hyperparamtuning/submit_02_hyperparamtuning_nested.sh --model all all   # Stage 2: nested-CV tuning
+bash src/03_sensitivity/submit_03_sensitivity.sh --model all all          # Stage 3: forcing sensitivity
 
 # 5. Draw the paper figures
-bash submit_paper_figures.sh
+bash src/submit_paper_figures.sh
 ```
 
-Job logs are written to `slurm_log/`. The partition and QOS names in the
+Job logs are written to `logs/`. The partition and QOS names in the
 `submit_*.sh` scripts (`standard`, `short`, `medium`) are those of the cluster
 the study was run on; change them if yours uses different names.
 
@@ -60,15 +60,11 @@ the study was run on; change them if yours uses different names.
 
 ## What is included
 
-- The full pipeline: SEAS5 download and conversion, preprocessing, the three
-  experimental stages, and all code-produced figures.
-- The paper's figures (`model_results/00_plots/`, `model_results/00_appendix/`)
-  and manuscript source (`LaTeX_report/main.tex`, `references.bib`, and the
-  Elsevier class files `elsarticle.cls` and `elsarticle-harv.bst` it compiles
-  with).
+The full pipeline: SEAS5 download and conversion, preprocessing, the three
+experimental stages, and all code-produced figures.
 
-Not included: discharge observations, SEAS5 data, model results and trained
-models. See [Data](#data) for how to obtain the inputs.
+Not included: discharge observations, SEAS5 data, model results, trained
+models and the figures themselves. See [Data](#data) for how to obtain the inputs.
 
 ---
 
@@ -77,7 +73,7 @@ models. See [Data](#data) for how to obtain the inputs.
 Nine catchments in three regimes. The main text of the paper shows one per
 regime (Zeravshan, Ayat, Kirchbichl-Bichlwang); the appendices show all nine.
 
-| id (`catchments.py`) | River | Station | Regime | Box lat (°N) | Box lon (°E) | Skipped hydro years | Folds |
+| id (`src/utils/catchments.py`) | River | Station | Regime | Box lat (°N) | Box lon (°E) | Skipped hydro years | Folds |
 |---|---|---|---|---|---|---|---|
 | `zeravshan`  | Zeravshan   | Dupuli                 | Central Asian mountain (nival–glacial) | 38–41 | 67–71 | 2005–2010 | 33 |
 | `ulkenboken` | Ulken Boken | Zhumba                 | Central Asian mountain (nival–glacial) | 48–50 | 82–84 | –         | 31 |
@@ -98,7 +94,7 @@ regime (Zeravshan, Ayat, Kirchbichl-Bichlwang); the appendices show all nine.
   each). A hydrological year starts on 1 October.
 
 Catchment definitions, including the discharge file names, live in
-`catchments.py`. A new catchment is added there.
+`src/utils/catchments.py`. A new catchment is added there.
 
 ---
 
@@ -130,15 +126,15 @@ nodes usually have no internet access). It takes long, so start it inside
 
 ```bash
 tmux new -s ecmwf
-bash download_ecmwf/download_interactive.sh    # GRIB download
+bash src/download_ecmwf/download_interactive.sh    # GRIB download
 ```
 
 The download skips files already present, so it can simply be restarted if
-it stops. When it has finished, convert the GRIB files to daily NetCDF with
+it stops; its progress is logged to `logs/ecmwf_download.log`. When it has finished, convert the GRIB files to daily NetCDF with
 one Slurm array job:
 
 ```bash
-bash download_ecmwf/submit_02_grib2netcdf.sh
+bash src/download_ecmwf/submit_02_grib2netcdf.sh
 ```
 
 Files are written under `seas5_dir` (see `config.toml`):
@@ -159,7 +155,7 @@ Republic of Tajikistan (Tajik Hydromet) and the Global Runoff Data Centre
 not publicly available. The Alpine records are available from GRDC.
 
 Each catchment needs one CSV file in `discharge_dir` (see `config.toml`),
-named as in `catchments.py` (e.g. `Zeravshan_1936-2025_Q.csv`): a header row,
+named as in `src/utils/catchments.py` (e.g. `Zeravshan_1936-2025_Q.csv`): a header row,
 then exactly two columns, the date and the daily discharge in m³/s. For
 example (illustrative values):
 
@@ -206,15 +202,15 @@ source activate FlowCast
 """
 ```
 
-Every job script runs these lines through `load_env.sh` before starting
+Every job script runs these lines through `src/load_env.sh` before starting
 Python. Leave the block empty if nothing is needed.
 
 ---
 
 ## Pipeline
 
-Run every command from the repository folder. The `submit_*` scripts are the
-normal entry point; the `python` commands underneath show what each job runs,
+Run every command from the repository root. The `submit_*` scripts are the
+normal entry point (they can be called from any folder); the `python` commands underneath show what each job runs,
 for use without Slurm (activate the environment first).
 
 ### Stage 00 — Preprocessing
@@ -225,11 +221,11 @@ encodings (sin/cos of day of year), the antecedent discharge anomaly `a0` and
 the observed discharge, and writes one feature table per catchment.
 
 ```bash
-bash submit_00_preprocesscatchment.sh        # all nine catchments
-python 00_preprocess_catchment.py zeravshan  # one catchment
+bash src/00_preprocessing/submit_00_preprocesscatchment.sh        # all nine catchments
+python src/00_preprocessing/00_preprocess_catchment.py zeravshan  # one catchment
 ```
 
-Output in `data_processed/`: `<catchment>_features.parquet` (one row per
+Output in `data/processed_data/`: `<catchment>_features.parquet` (one row per
 verification date × initialisation × ensemble member) and `<catchment>_folds.txt`
 (the hydrological years used as cross-validation folds).
 
@@ -241,12 +237,12 @@ cross-validation: `climatology`, `persistence` (also writes
 model.
 
 ```bash
-bash submit_01_exploration.sh all                 # all catchments
-bash submit_01_exploration.sh zeravshan ayat      # chosen catchments
-python 01_exploration.py zeravshan xgb
+bash src/01_exploration/submit_01_exploration.sh all                 # all catchments
+bash src/01_exploration/submit_01_exploration.sh zeravshan ayat      # chosen catchments
+python src/01_exploration/01_exploration.py zeravshan xgb
 ```
 
-Output in `model_results/01_exploration/results_<catchment>_<model>/`:
+Output in `data/results/01_exploration/results_<catchment>_<model>/`:
 `fold_metrics.csv` (NSE, KGE, ACC, CRPS per fold), `summary.csv`,
 `predictions_daily.parquet` (ensemble mean), `predictions_members.parquet`
 (per member; learned models) and `best_model_fold<N>.pt` (LSTM).
@@ -257,20 +253,20 @@ Nested cross-validation for `rf`, `xgb` and `lstm` (Ridge tunes its own
 regularisation within Stage 01). For each outer fold, 15 candidate
 configurations are scored on 5 inner folds; the best is retrained on all
 outer-training years and scored on the held-out year. One job per catchment,
-model and outer year, read from `data_processed/<catchment>_folds.txt`.
+model and outer year, read from `data/processed_data/<catchment>_folds.txt`.
 **Requires Stage 01**, whose results serve as the untuned reference.
 
 ```bash
-bash submit_02_hyperparamtuning_nested.sh --model all all     # everything
-bash submit_02_hyperparamtuning_nested.sh --model rf zeravshan
-OUTER_HY=2001 python 02_hyperparamtuning_nested.py zeravshan rf
+bash src/02_hyperparamtuning/submit_02_hyperparamtuning_nested.sh --model all all     # everything
+bash src/02_hyperparamtuning/submit_02_hyperparamtuning_nested.sh --model rf zeravshan
+OUTER_HY=2001 python src/02_hyperparamtuning/02_hyperparamtuning_nested.py zeravshan rf
 ```
 
 Without options the script tunes `lstm` for `zeravshan ayat kirchbichl`.
 Environment variables: `OUTER_HY` (held-out year, required for direct runs),
 `SEED` (default 107), `N_INNER` (default 5).
 
-Output in `model_results/02_hyperparamtuning/results_<catchment>_<model>_nested_seed<SEED>/outer_<year>/`:
+Output in `data/results/02_hyperparamtuning/results_<catchment>_<model>_nested_seed<SEED>/outer_<year>/`:
 `inner_cv_acc.csv`, `winner.csv`, `outer_test_metrics.csv` (tuned and untuned
 scores), `predictions_daily.parquet`, `predictions_members.parquet`.
 
@@ -284,33 +280,33 @@ ensemble member). The seasonal encodings and `a0` are left untouched. `rf`,
 most Stage 02 outer folds. **Requires Stage 02** to have finished.
 
 ```bash
-bash submit_03_sensitivity.sh --model all all
-bash submit_03_sensitivity.sh --model xgb zeravshan
-python 03_sensitivity_climate_input.py zeravshan xgb
+bash src/03_sensitivity/submit_03_sensitivity.sh --model all all
+bash src/03_sensitivity/submit_03_sensitivity.sh --model xgb zeravshan
+python src/03_sensitivity/03_sensitivity_climate_input.py zeravshan xgb
 ```
 
 Without options the script runs all four models for
 `zeravshan ayat kirchbichl`.
 
-Output in `model_results/03_sensitivity/results_<catchment>_<model>/`:
+Output in `data/results/03_sensitivity/results_<catchment>_<model>/`:
 `sensitivity_fold_metrics.csv` and `sensitivity_summary.csv`. Each job also
 fits the chosen configuration on all years and saves it as
-`trained_models/<catchment>_<model>_final_seed<SEED>.joblib` (`.pt` for the
-LSTM); `flowcast_src.sensitivity.load_fitted` reloads it.
+`data/trained_models/<catchment>_<model>_final_seed<SEED>.joblib` (`.pt` for the
+LSTM); `utils.sensitivity.load_fitted` (`src/utils/sensitivity.py`) reloads it.
 
 ---
 
 ## Paper figures
 
 ```bash
-bash submit_paper_figures.sh
+bash src/submit_paper_figures.sh
 ```
 
 One Slurm job (a few minutes) that regenerates every code-produced figure of
-the paper under the file names `LaTeX_report/main.tex` uses. It needs the
+the paper under the file names the manuscript uses. It needs the
 results of all three stages for all nine catchments, and the discharge CSVs.
 
-| Plot script | Raw output (`model_results/00_plots/`) | Main text | Appendix (mountain, steppe, Alpine) |
+| Plot script (`src/<stage>/`) | Raw output (`data/results/figures/`) | Main text | Appendix (mountain, steppe, Alpine) |
 |---|---|---|---|
 | `01_plot_exploration.py` | `01a_boxplotcomparison_short` | Fig. 3 | A1–A3 |
 | | `01b_boxplotcomparison_long` | Fig. 4 | A4–A6 |
@@ -320,14 +316,14 @@ results of all three stages for all nine catchments, and the discharge CSVs.
 | | `04b_tuningvsreference_long` | Fig. 8 | B7–B9 |
 | `03_plot_sensitivity.py` | `07_sensitivity` | Fig. 9 | C1–C3 |
 
-The results are written to `model_results/00_plots/fig03.pdf`–`fig09.pdf` and
-`model_results/00_appendix/figA01.pdf`–`figC03.pdf`. Fig. 1 (catchment map),
+The results are written to `data/results/figures/main/fig03.pdf`–`fig09.pdf` and
+`data/results/figures/appendix/figA01.pdf`–`figC03.pdf`. Fig. 1 (catchment map),
 Fig. 2 (workflow schematic) and the graphical abstract were made outside this
 code.
 
 The plot scripts can also be run on their own for any set of catchments, e.g.
-`python 01_plot_exploration.py zeravshan kurshim`; they write the raw file
-names above.
+`python src/01_exploration/01_plot_exploration.py zeravshan kurshim`; they
+write the raw file names above to `data/results/figures/`.
 
 ---
 
@@ -347,30 +343,36 @@ names above.
 ## Repository layout
 
 ```
+.
+├── README.md
+├── LICENSE                          MIT License
+├── CITATION.cff                     citation metadata of this code
 ├── config.toml                      the only file to edit (data paths, download, Slurm setup)
-├── environment.yml                  conda environment
-├── catchments.py                    catchment definitions
-├── load_env.sh                      runs config.toml's env_setup inside each job
-├── 00_preprocess_catchment.py       Stage 00
-├── 01_exploration.py                Stage 01
-├── 02_hyperparamtuning_nested.py    Stage 02
-├── 03_sensitivity_climate_input.py  Stage 03
-├── 0{1,2,3}_plot_*.py               figures of each stage
-├── submit_*.sh / run_*.sh           Slurm submission / job scripts per stage and for the figures
-├── flowcast_src/                    shared library (data, features, CV, models, metrics, plotting)
-├── download_ecmwf/                  SEAS5 download (CDS) and GRIB -> NetCDF conversion
-├── model_results/
-│   ├── 00_plots/                    paper figures (main text)
-│   └── 00_appendix/                 paper figures (appendices)
-├── LaTeX_report/                    manuscript source (main.tex, references.bib, Elsevier class files)
-├── CITATION.cff
-└── LICENSE
+├── environment.yml                  conda environment, with the versions used for the paper
+├── src/
+│   ├── download_ecmwf/              SEAS5 download (CDS) and GRIB -> NetCDF conversion
+│   ├── 00_preprocessing/            Stage 00: feature tables
+│   ├── 01_exploration/              Stage 01: untuned models and baselines, and their figures
+│   ├── 02_hyperparamtuning/         Stage 02: nested-CV tuning, and its figures
+│   ├── 03_sensitivity/              Stage 03: forcing sensitivity, and its figures
+│   ├── utils/                       shared library (catchments, data, features, CV, models, metrics, plotting)
+│   ├── load_env.sh                  runs config.toml's env_setup inside each job
+│   └── submit_paper_figures.sh / run_paper_figures.sh
+│
+│   not in the repository:
+├── data/                            inputs and every output; each subfolder may be a symbolic link
+│   ├── discharge_obs/  seas5/       inputs (default locations, see Data)
+│   ├── processed_data/              Stage 00 feature tables and fold lists
+│   ├── trained_models/              final models of Stage 03
+│   └── results/
+│       ├── 01_exploration/ ...      tables of each stage
+│       └── figures/                 plot outputs; paper figures in main/ and appendix/
+└── logs/                            Slurm and download logs
 ```
 
-Not part of the repository: `data/` (the inputs, by default; see
-[Data](#data)) and the folders the pipeline creates, `data_processed/`,
-`model_results/01_exploration/`, `02_hyperparamtuning/`, `03_sensitivity/`,
-`trained_models/` and `slurm_log/`.
+Each stage folder holds the stage's Python script(s), its `submit_*.sh`
+(submits the jobs) and `run_*.sh` (the body of one job). The scripts put
+`src/` on the Python path, so they run from any folder.
 
 ---
 
@@ -381,10 +383,3 @@ publication) and this software, <https://doi.org/10.5281/zenodo.23015467>. Citat
 `CITATION.cff`.
 
 - **Code:** MIT licence, see `LICENSE`.
-- **Figures and manuscript source** (`model_results/00_plots/`,
-  `model_results/00_appendix/`, `LaTeX_report/main.tex`,
-  `LaTeX_report/references.bib`): Creative Commons Attribution 4.0
-  International (CC BY 4.0), <https://creativecommons.org/licenses/by/4.0/>.
-- **Elsevier class files** (`LaTeX_report/elsarticle.cls`,
-  `LaTeX_report/elsarticle-harv.bst`): © Elsevier Ltd, distributed under the
-  LaTeX Project Public License 1.3 or later, <https://www.latex-project.org/lppl.txt>.

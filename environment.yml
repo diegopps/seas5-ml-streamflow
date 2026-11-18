@@ -22,7 +22,7 @@ dependencies:
   - pytorch=2.10.0
   - matplotlib=3.10.8
   - joblib=1.5.3
-  # SEAS5 download and GRIB -> NetCDF conversion (download_ecmwf/);
+  # SEAS5 download and GRIB -> NetCDF conversion (src/download_ecmwf/);
   # eccodes and cdo also provide the grib_copy and cdo command-line tools
   - cdsapi=0.7.7
   - eccodes=2.44.0
