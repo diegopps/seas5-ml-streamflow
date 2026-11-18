@@ -13,7 +13,8 @@ hydro years only.
                       flat (phi = 1).
   damped_persistence  decays that anomaly geometrically, a_hat(h) = phi**h * a0,
                       with phi the lag-1 autocorrelation of the observed anomaly
-                      record (estimated once per catchment).
+                      record, estimated per fold on the fold's training hydro
+                      years, against the fold's climatology (`fold_phi`).
 """
 
 import time
@@ -62,18 +63,40 @@ def estimate_phi(anomaly_series: pd.Series) -> float:
 
 
 def anomaly_record(obs_daily_q: pd.Series, doy_clim: dict,
-                   skip_years: set, *, start_year: int) -> pd.Series:
+                   skip_years: set, *, start_year: int,
+                   train_years=None) -> pd.Series:
     """
-    Observed log1p(Q) anomaly series over the hydro years a climatology may
-    use: hydro years from `start_year` onward, skip_years excluded (see
-    utils.climatology.eligible_hydro_years).
+    Observed log1p(Q) anomaly series against `doy_clim`, over the hydro years
+    a climatology may use: hydro years from `start_year` onward, skip_years
+    excluded (see utils.climatology.eligible_hydro_years), and, if
+    `train_years` is given, only those hydro years (same rule as
+    utils.climatology.compute_climatology). Days of excluded years are
+    absent, not NaN, so the series has gaps there.
     """
     years = eligible_hydro_years(obs_daily_q, skip_years,
                                  start_year=start_year)
+    if train_years is not None:
+        years &= {int(y) for y in train_years}
     keep = obs_daily_q[np.isin(hydro_year_of(obs_daily_q.index), list(years))]
     doy = keep.index.dayofyear
     clim = pd.Series([doy_clim.get(d, np.nan) for d in doy], index=keep.index)
     return np.log1p(keep) - clim
+
+
+def fold_phi(fit_clim, train_years) -> float:
+    """
+    Damped-persistence phi for one fold: lag-1 autocorrelation of the
+    observed anomaly record over the fold's training hydro years, against the
+    fold's climatology. `fit_clim` is the catchment's
+    utils.climatology.ClimatologyFitter, which also holds the observed record,
+    skip_years and start year. Day pairs are never formed across the gap a
+    held-out year leaves (see `estimate_phi`).
+    """
+    doy_clim = fit_clim(train_years)
+    anom = anomaly_record(fit_clim.obs_daily_q, doy_clim, fit_clim.skip_years,
+                          start_year=fit_clim.start_year,
+                          train_years=train_years)
+    return estimate_phi(anom)
 
 
 def run_climatology(df, unique_years, fit_clim, lead_bins):
@@ -109,11 +132,16 @@ def run_climatology(df, unique_years, fit_clim, lead_bins):
     return _finalise_deterministic(fold_metrics, all_pred_dfs)
 
 
-def run_persistence(df, unique_years, fit_clim, phi, model_name):
+def run_persistence(df, unique_years, fit_clim, model_name, *, phi=None):
     """
-    LOGO-CV loop for persistence (phi=1) or damped persistence (phi<1).
+    LOGO-CV loop for persistence or damped persistence.
     Each fold's a0 and climatology come from `fit_clim` (a
     utils.climatology.ClimatologyFitter) on the fold's training years.
+
+    phi : float or None
+        A fixed decay factor for every fold (persistence: 1.0), or None to
+        estimate it per fold on the fold's training years (`fold_phi`;
+        damped persistence). The value used is recorded per fold as 'phi'.
     """
     fold_metrics, all_pred_dfs = [], []
 
@@ -128,6 +156,8 @@ def run_persistence(df, unique_years, fit_clim, phi, model_name):
         df_test = dedup_unique(df_fold)
         doy_clim = apply_fold_climatology(df_test, fit_clim,
                                           split['train_years'])
+        phi_fold = (fold_phi(fit_clim, split['train_years']) if phi is None
+                    else float(phi))
 
         df_test['doy'] = df_test['date'].dt.dayofyear
         q_clim_log = df_test['doy'].map(doy_clim)
@@ -135,7 +165,7 @@ def run_persistence(df, unique_years, fit_clim, phi, model_name):
         a0 = df_test['a0'].values
 
         lead_day = df_test['lead_day'].values.astype(float)
-        pred_log_q = (phi ** lead_day) * a0 + q_clim_log.values
+        pred_log_q = (phi_fold ** lead_day) * a0 + q_clim_log.values
         df_test['Q_pred'] = np.clip(np.expm1(pred_log_q), 0.0, None)
         df_test['Q_clim'] = np.expm1(q_clim_log.values)
         df_test = df_test.rename(columns={'Q': 'Q_raw'})
@@ -143,6 +173,7 @@ def run_persistence(df, unique_years, fit_clim, phi, model_name):
         rec, ens = _score_deterministic(df_test, test_year, fold_t0)
         if rec is None:
             continue
+        rec['phi'] = phi_fold
         fold_metrics.append(rec)
         all_pred_dfs.append(ens)
 

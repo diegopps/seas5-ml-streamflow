@@ -102,13 +102,11 @@ def run_climatology(catchment_id, df, unique_years, fit_clim, t0):
     write_outputs(results_dir(catchment_id, 'climatology'), mdf, preds, summary)
 
 
-def run_persistence(catchment_id, df, unique_years, fit_clim,
-                    obs_daily_q, skip_years, t0):
+def run_persistence(catchment_id, df, unique_years, fit_clim, t0):
     # Plain persistence (phi = 1).
     t_p = time.time()
     mdf_p, preds_p = ref.run_persistence(
-        df, unique_years, fit_clim, phi=1.0,
-        model_name='persistence')
+        df, unique_years, fit_clim, 'persistence', phi=1.0)
     summary_p = build_summary(catchment_id, 'persistence', mdf_p,
                               time.time() - t_p, has_crps=False,
                               extra={'phi': 1.0,
@@ -116,23 +114,22 @@ def run_persistence(catchment_id, df, unique_years, fit_clim,
     write_outputs(results_dir(catchment_id, 'persistence'),
                   mdf_p, preds_p, summary_p)
 
-    # Damped persistence — phi estimated once from the anomaly record over the
-    # same CLIM_START_YEAR window the climatology is fitted on, so the decay
-    # rate and the climatology it decays towards describe one period.
-    # TODO(R1): still one phi on all years, against the all-years
-    # climatology; to be estimated per fold on the training years only.
-    anomaly_full = ref.anomaly_record(obs_daily_q, fit_clim(), skip_years,
-                                      start_year=CLIM_START_YEAR)
-    phi = ref.estimate_phi(anomaly_full)
-    print(f"\nDamped persistence phi = {phi:.4f}\n")
-
+    # Damped persistence — phi estimated PER FOLD from the anomaly record of
+    # the fold's training hydro years, against the fold's climatology, so the
+    # decay rate and the climatology it decays towards describe one period
+    # and the test year informs neither. Per-fold values are in
+    # fold_metrics.csv ('phi'); the summary gives their mean and range.
     t_d = time.time()
     mdf_d, preds_d = ref.run_persistence(
-        df, unique_years, fit_clim, phi=phi,
-        model_name='damped_persistence')
+        df, unique_years, fit_clim, 'damped_persistence', phi=None)
+    phi = mdf_d['phi']
+    print(f"\nDamped persistence phi (per fold): mean {phi.mean():.4f}, "
+          f"range {phi.min():.4f}-{phi.max():.4f}\n")
     summary_d = build_summary(catchment_id, 'damped_persistence', mdf_d,
                               time.time() - t_d, has_crps=False,
-                              extra={'phi': round(phi, 4),
+                              extra={'phi_mean': round(phi.mean(), 4),
+                                     'phi_min': round(phi.min(), 4),
+                                     'phi_max': round(phi.max(), 4),
                                      'clim_start_year': CLIM_START_YEAR})
     write_outputs(results_dir(catchment_id, 'damped_persistence'),
                   mdf_d, preds_d, summary_d)
@@ -198,8 +195,7 @@ def main():
     if model == 'climatology':
         run_climatology(catchment_id, df, unique_years, fit_clim, t0)
     elif model == 'persistence':
-        run_persistence(catchment_id, df, unique_years, fit_clim,
-                        obs_daily_q, skip_years, t0)
+        run_persistence(catchment_id, df, unique_years, fit_clim, t0)
     elif model in TABULAR_FACTORIES:
         run_tabular(catchment_id, model, df, unique_years, fit_clim, t0)
     elif model == 'lstm':
