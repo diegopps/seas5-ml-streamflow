@@ -1,4 +1,4 @@
-# FlowCast configuration — the only file you need to edit.
+# seas5-ml-streamflow configuration — the only file you need to edit.
 # Relative paths are relative to this folder (the repository root).
 
 [paths]

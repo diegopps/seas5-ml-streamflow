@@ -8,3 +8,6 @@ data/
 
 # Manuscript source (kept locally, not distributed with the code)
 latex/
+
+# TODO.md
+TODO.md

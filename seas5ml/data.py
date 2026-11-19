@@ -1,0 +1,126 @@
+"""
+seas5ml.data – Data loading and assembly, shared by every stage.
+
+Loads the observed discharge record and the preprocessed SEAS5 feature
+parquet, and assembles the analysis frame used by every model: features
+merged with the observed target Q, missing-Q rows dropped, and skip_years
+removed.
+"""
+
+import numpy as np
+import pandas as pd
+
+GROUP_COL = 'hydro_year'
+
+
+def hydro_year_of(dates) -> np.ndarray:
+    """
+    Hydro year of each date. A hydro year runs 1 Oct - 30 Sep and is named
+    by the calendar year it ends in (1 Oct 2004 - 30 Sep 2005 is 2005).
+    Same convention as the `hydro_year` column written by preprocessing.
+    """
+    dates = pd.DatetimeIndex(dates)
+    return np.asarray(dates.year) + (np.asarray(dates.month) >= 10)
+
+
+def initialised_in(df: pd.DataFrame, years) -> np.ndarray:
+    """
+    Boolean row mask: True where the row's trajectory was initialised in one
+    of the hydro `years` (hydro year of init_date, not of the verification
+    date).
+
+    Training rule used by every stage: a training run uses only trajectories
+    initialised in its own training years. A trajectory initialised in a
+    held-out year can verify partly in a training year (it crosses 1 Oct),
+    and those rows carry the held-out year's discharge as a0; this mask is
+    what keeps them out of training.
+    """
+    return np.isin(hydro_year_of(df['init_date']), [int(y) for y in years])
+
+
+def load_obs_discharge(discharge_csv: str) -> pd.Series:
+    """
+    Load observed daily discharge as a Series indexed by normalised date.
+
+    The CSV is expected to hold exactly two columns (date, discharge). Rows
+    with missing discharge are dropped and the series is sorted by date.
+    """
+    df = pd.read_csv(discharge_csv)
+    if df.shape[1] != 2:
+        raise ValueError(
+            f"Expected 2 columns (date, Q) in {discharge_csv}, "
+            f"found {df.shape[1]}: {list(df.columns)}"
+        )
+    df.columns = ['date', 'Q']
+    df['date'] = pd.to_datetime(df['date'], format='mixed').dt.normalize()
+    df = df.dropna(subset=['Q']).set_index('date')['Q'].sort_index()
+    return df
+
+
+def load_features(in_path: str) -> pd.DataFrame:
+    """Load the preprocessed feature parquet with normalised date columns."""
+    df = pd.read_parquet(in_path)
+    df['date'] = pd.to_datetime(df['date']).dt.normalize()
+    df['init_date'] = pd.to_datetime(df['init_date']).dt.normalize()
+    return df
+
+
+def attach_observed_target(df_features: pd.DataFrame,
+                           obs_daily_q: pd.Series) -> pd.DataFrame:
+    """
+    Merge the observed daily discharge onto the feature frame as target `Q`,
+    joined on date. Any pre-existing Q column is replaced.
+    """
+    obs_q_df = obs_daily_q.rename('Q_obs').reset_index()
+    obs_q_df.columns = ['date', 'Q_obs']
+    df = df_features.drop(columns=['Q'], errors='ignore')
+    df = df.merge(obs_q_df, on='date', how='left')
+    return df.rename(columns={'Q_obs': 'Q'})
+
+
+def build_analysis_frame(in_path: str,
+                         obs_daily_q: pd.Series,
+                         skip_years: set) -> pd.DataFrame:
+    """
+    Assemble the analysis frame shared by every model:
+        load features -> attach observed Q -> drop missing-Q rows
+        -> remove skip_years.
+
+    Returns the frame plus the sorted list of hydro years it contains.
+    """
+    df = load_features(in_path)
+    df = attach_observed_target(df, obs_daily_q)
+    df = df.dropna(subset=['Q']).reset_index(drop=True)
+    df = df[~df[GROUP_COL].isin(skip_years)].reset_index(drop=True)
+    unique_years = sorted(df[GROUP_COL].unique())
+    return df, unique_years
+
+
+def load_catchment(catchment_id: str):
+    """
+    Everything a stage needs to train on one catchment: the analysis frame
+    (`build_analysis_frame` on its stage-0 feature table), its sorted hydro
+    years, and the catchment's seas5ml.climatology.ClimatologyFitter, which
+    fits each training run's climatology on that run's years only.
+    """
+    # Imported here: climatology imports this module.
+    from .catchments import CATCHMENTS, SHARED
+    from .climatology import ClimatologyFitter
+    from .paths import features_path
+
+    cfg = CATCHMENTS[catchment_id]
+    skip_years = cfg.get('skip_years', set())
+    obs_daily_q = load_obs_discharge(cfg['discharge_csv'])
+    df, unique_years = build_analysis_frame(str(features_path(catchment_id)),
+                                            obs_daily_q, skip_years)
+    window = SHARED.get('daily_clim_window', 31)
+    start_year = SHARED['clim_start_year']          # no .get() -- must be set
+    fit_clim = ClimatologyFitter(obs_daily_q, skip_years, window,
+                                 start_year=start_year)
+
+    print(f"  Rows: {len(df):,} | Hydro years: {len(unique_years)} "
+          f"({min(unique_years)}-{max(unique_years)})")
+    print(f"  Climatology: per training run, on its training hydro years "
+          f"from HY{start_year} minus skip_years ({len(skip_years)} skipped), "
+          f"{window}-day smoothing")
+    return df, unique_years, fit_clim
