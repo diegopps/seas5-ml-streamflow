@@ -23,7 +23,7 @@ DESIGN   = DEFAULT_DESIGN
 PLOT_DIR = str(paths.figures_dir(DESIGN))
 
 # Models with a tuned (nested-CV) run in stage 1.
-HPTUNE_MODELS = ["lstm", "rf", "xgb"]
+HPTUNE_MODELS = ["lstm", "rf", "xgb", "pooled_lstm"]
 
 
 # Design name as it appears in figure titles (loyo keeps the label the
@@ -184,7 +184,7 @@ def parse_catchment_args(args: list) -> list:
 
 # Full model order, used by the boxplot and lead-time figures.
 MODEL_ORDER = ["climatology", "persistence", "damped_persistence",
-              "ridge", "rf", "xgb", "lstm"]
+              "ridge", "rf", "xgb", "lstm", "pooled_lstm"]
 
 # Heatmap ACC is undefined for climatology by construction (zero predicted
 # anomaly) — the heatmap figure filters it out of MODEL_ORDER itself.
@@ -197,6 +197,7 @@ MODEL_LABELS = {
     "rf":                 "Random Forest",
     "xgb":                "XGBoost",
     "lstm":               "LSTM",
+    "pooled_lstm":        "Pooled LSTM",
 }
 MODEL_LABELS_BAR = {
     "climatology":        "Clim",
@@ -206,12 +207,19 @@ MODEL_LABELS_BAR = {
     "rf":                 "RF",
     "xgb":                "XGB",
     "lstm":               "LSTM",
+    "pooled_lstm":        "P-LSTM",
 }
 # Colorblind-friendly categorical palette (validated adjacent-pair order).
 # climatology stays neutral grey (it is the no-skill floor, not a model to
 # distinguish). persistence / damped_persistence share the blue hue family
 # (two shades) since they are variants of the same cheap baseline; ridge,
 # rf, xgb, lstm each get one of the remaining maximally-distinct hues.
+# pooled_lstm takes the palette's yellow: of the free slots it is the only
+# hue that keeps protan/deutan separation >= 8 (OKLab x100) from every other
+# model (closest: rf 9.1, ridge 9.7; lstm, its neighbour, 16.2). Violets
+# collapse onto the persistence blues under red-green CVD; darker ambers onto
+# ridge's orange. Its contrast on white is 2.2:1, so its marks always carry
+# a dark outline or a label (box edges, legend, strip tick labels).
 MODEL_COLORS = {
     "climatology":        "#adb5bd",  # neutral grey — no-skill floor
     "persistence":        "#2a78d6",  # blue
@@ -220,6 +228,7 @@ MODEL_COLORS = {
     "rf":                 "#1baf7a",  # aqua
     "xgb":                "#e87ba4",  # magenta
     "lstm":               "#008300",  # green
+    "pooled_lstm":        "#eda100",  # yellow
 }
 
 # ═══════════════════════════════════════════════════════════════════════

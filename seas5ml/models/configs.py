@@ -15,7 +15,11 @@ Every configuration is a dict with a 'label'; the remaining keys are read by
 seas5ml.models.tabular.build_estimator and seas5ml.models.lstm.fit_lstm.
 """
 
-LEARNED_MODELS = ("ridge", "rf", "xgb", "lstm")
+LEARNED_MODELS = ("ridge", "rf", "xgb", "lstm")   # trained per catchment
+
+# Trained on the whole catchment pool (seas5ml.pooled), scored per catchment;
+# same default configuration and grid as the single-catchment LSTM.
+POOLED_MODELS = ("pooled_lstm",)
 
 DEFAULTS = {
     # alpha is chosen from `alphas` by RidgeCV (generalised cross-validation).
@@ -29,6 +33,7 @@ DEFAULTS = {
     'lstm':  {'label': 'default', 'hidden': 128, 'lr': 3e-4, 'wd': 1e-4,
               'batch': 512},
 }
+DEFAULTS['pooled_lstm'] = dict(DEFAULTS['lstm'])
 
 # ── LSTM ─────────────────────────────────────────────────────────────────
 # Random-search grid (R01-R15), a frozen log-uniform sample over
@@ -96,8 +101,11 @@ GRIDS = {
     'lstm': LSTM_GRID,
     'rf': RF_GRID,
     'xgb': XGB_GRID,
+    'pooled_lstm': LSTM_GRID,
 }
-TUNED_MODELS = tuple(GRIDS)
+# Tuned per catchment by stage 1's run.py; the pooled models are tuned by
+# run_pooled.py.
+TUNED_MODELS = ('lstm', 'rf', 'xgb')
 
 
 def grid_config(model: str, label: str) -> dict:

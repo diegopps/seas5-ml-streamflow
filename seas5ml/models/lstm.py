@@ -15,6 +15,10 @@ training sequences and averaged at evaluation.
 The tunable hyperparameters (hidden size, learning rate, weight decay, batch
 size) come from a configuration (seas5ml.models.configs); the constants
 below are fixed for every configuration.
+
+The pooled LSTM (pooled_lstm; end of this module) is the same network and
+training loop trained on every catchment of the pool at once, with a one-hot
+catchment ID, one shared input scaler and the NSE* loss.
 """
 
 import copy
@@ -85,6 +89,21 @@ def nse_loss_anomaly(pred, tgt, clim, valid):
 _LOSS_FN = nse_loss_real if LOSS_SPACE == 'real' else nse_loss_anomaly
 
 
+# Pooled model: NSE* (Kratzert et al. 2019, HESS 23, 5089-5110, eq. 2): each
+# squared error is divided by (s_c + eps)^2, s_c the standard deviation of
+# catchment c's target over its training years, and averaged over all
+# samples. Without it the steppe catchments, whose anomalies are much larger,
+# would dominate the pooled loss. eps as in the paper.
+NSE_STAR_EPS = 0.1
+
+
+def nse_star_loss(pred, tgt, weight, valid):
+    """NSE* loss in log1p-anomaly space; `weight` holds 1 / (s_c + eps)^2 at
+    every step of a catchment-c trajectory."""
+    se = (pred[valid] - tgt[valid]) ** 2
+    return (weight[valid] * se).mean()
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # TRAJECTORIES / DATASET
 # ═══════════════════════════════════════════════════════════════════════
@@ -114,6 +133,20 @@ def build_trajectories(df, doy_clim, dyn_scaler, is_train, score_years=None,
     on its rows that verify in a training year (they carry the held-out
     year's a0; see seas5ml.data.initialised_in). Prediction calls leave it
     None: a test year is scored on every trajectory that reaches it.
+    """
+    trajectories, fc_dyn_list = raw_trajectories(
+        df, doy_clim, score_years=score_years, init_years=init_years)
+    if is_train:
+        dyn_scaler = fit_dyn_scaler(fc_dyn_list)
+    apply_dyn_scaler(trajectories, dyn_scaler)
+    return trajectories, dyn_scaler
+
+
+def raw_trajectories(df, doy_clim, score_years=None, init_years=None):
+    """
+    The trajectories of `build_trajectories`, unstandardised, plus the list
+    of their scored steps' dynamic features (what a training scaler is fit
+    on). See `build_trajectories` for score_years and init_years.
     """
     if score_years is not None:
         score_years = set(score_years)
@@ -156,20 +189,26 @@ def build_trajectories(df, doy_clim, dyn_scaler, is_train, score_years=None,
             'hydro_year': hy,
             'scored': scored,
         })
+    return trajectories, fc_dyn_list
 
-    if is_train:
-        all_fc = np.concatenate(fc_dyn_list, axis=0)
-        dyn_mean = np.nanmean(all_fc, axis=0)
-        dyn_std = np.nanstd(all_fc, axis=0)
-        dyn_std[dyn_std == 0] = 1.0
-        dyn_scaler = {'mean': dyn_mean, 'std': dyn_std}
 
+def fit_dyn_scaler(fc_dyn_list):
+    """Per-variable mean / std over the given scored steps (a zero std is
+    set to 1)."""
+    all_fc = np.concatenate(fc_dyn_list, axis=0)
+    dyn_mean = np.nanmean(all_fc, axis=0)
+    dyn_std = np.nanstd(all_fc, axis=0)
+    dyn_std[dyn_std == 0] = 1.0
+    return {'mean': dyn_mean, 'std': dyn_std}
+
+
+def apply_dyn_scaler(trajectories, dyn_scaler):
+    """Standardise every trajectory's dynamic features in place; non-finite
+    values become 0 (the training mean)."""
     for traj in trajectories:
         fd = (traj['fc_dyn'] - dyn_scaler['mean']) / dyn_scaler['std']
         fd[~np.isfinite(fd)] = 0.0
         traj['fc_dyn'] = fd.astype(np.float32)
-
-    return trajectories, dyn_scaler
 
 
 class TrajectoryDataset(Dataset):
@@ -240,7 +279,12 @@ class DischargeLSTM(nn.Module):
 # TRAIN / PREDICT
 # ═══════════════════════════════════════════════════════════════════════
 
-def run_epoch(model, loader, optimizer, amp_scaler, is_train):
+def run_epoch(model, loader, optimizer, amp_scaler, is_train, loss_fn=None):
+    """One pass over `loader`. Batches are (inputs, target, aux, mask);
+    `loss_fn(pred, target, aux, valid)` defaults to the single-catchment loss
+    (aux = climatology); the pooled model passes nse_star_loss (aux = per-step
+    weight)."""
+    loss_fn = _LOSS_FN if loss_fn is None else loss_fn
     model.train(is_train)
     total_loss = 0.0
     total_batches = 0
@@ -260,10 +304,10 @@ def run_epoch(model, loader, optimizer, amp_scaler, is_train):
             if USE_AMP:
                 with torch.autocast(device_type='cuda', dtype=AMP_DTYPE):
                     pred = model(fc_dyn)
-                    loss = _LOSS_FN(pred, tgt, clim, valid)
+                    loss = loss_fn(pred, tgt, clim, valid)
             else:
                 pred = model(fc_dyn)
-                loss = _LOSS_FN(pred, tgt, clim, valid)
+                loss = loss_fn(pred, tgt, clim, valid)
 
             if is_train:
                 optimizer.zero_grad()
@@ -319,6 +363,50 @@ def predict_trajectories(model, trajectories):
 # FIT / PREDICT
 # ═══════════════════════════════════════════════════════════════════════
 
+def train_net(model, tr_loader, val_loader, config, loss_fn=None):
+    """
+    Train `model` with Adam and ReduceLROnPlateau, early-stopping on the
+    validation loss (PATIENCE epochs, at most MAX_EPOCHS), and load the
+    weights of the best validation epoch into it. Shared by the single and
+    the pooled LSTM; `loss_fn` as in `run_epoch`. Returns (best_epoch,
+    best_val_loss, n_epochs), n_epochs being the epochs actually run.
+    """
+    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'],
+                                 weight_decay=config['wd'])
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=LR_FACTOR, patience=LR_PATIENCE)
+    amp_scaler = torch.amp.GradScaler('cuda', enabled=USE_AMP)
+
+    best_val_loss = np.inf
+    best_epoch = 0
+    best_state = None
+    patience_count = 0
+    n_epochs = 0
+
+    for epoch in range(1, MAX_EPOCHS + 1):
+        n_epochs = epoch
+        run_epoch(model, tr_loader, optimizer, amp_scaler, True, loss_fn)
+        val_loss = run_epoch(model, val_loader, optimizer, amp_scaler, False,
+                             loss_fn)
+        scheduler.step(val_loss)
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch = epoch
+            patience_count = 0
+            best_state = copy.deepcopy(model.state_dict())
+        else:
+            patience_count += 1
+            if patience_count >= PATIENCE:
+                break
+
+    if best_state is None:
+        raise RuntimeError("LSTM fit: no epoch produced a finite validation "
+                           "loss")
+    model.load_state_dict(best_state)
+    return best_epoch, best_val_loss, n_epochs
+
+
 def fit_lstm(config, df, *, fit_clim, tr_yrs, val_yrs):
     """
     Train the LSTM for one configuration on `tr_yrs`, early-stopping on
@@ -365,36 +453,8 @@ def fit_lstm(config, df, *, fit_clim, tr_yrs, val_yrs):
             'n_layers': N_LAYERS, 'dropout': DROPOUT}
     model = DischargeLSTM(arch['n_dyn'], arch['hidden'], arch['n_layers'],
                           arch['dropout']).to(DEVICE)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'],
-                                 weight_decay=config['wd'])
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=LR_FACTOR, patience=LR_PATIENCE)
-    amp_scaler = torch.amp.GradScaler('cuda', enabled=USE_AMP)
-
-    best_val_loss = np.inf
-    best_epoch = 0
-    best_state = None
-    patience_count = 0
-
-    for epoch in range(1, MAX_EPOCHS + 1):
-        run_epoch(model, tr_loader, optimizer, amp_scaler, True)
-        val_loss = run_epoch(model, val_loader, optimizer, amp_scaler, False)
-        scheduler.step(val_loss)
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_epoch = epoch
-            patience_count = 0
-            best_state = copy.deepcopy(model.state_dict())
-        else:
-            patience_count += 1
-            if patience_count >= PATIENCE:
-                break
-
-    if best_state is None:
-        raise RuntimeError("LSTM fit: no epoch produced a finite validation "
-                           "loss")
-    model.load_state_dict(best_state)
+    best_epoch, best_val_loss, _ = train_net(model, tr_loader, val_loader,
+                                             config)
     return {'kind': 'lstm', 'model': 'lstm', 'config': config,
             'net': model, 'dyn_scaler': dyn_sc, 'arch': arch,
             'doy_clim': doy_clim,
@@ -420,5 +480,156 @@ def predict_lstm(fitted, df_score, *, score_years):
                                   False, score_years=score_years)
     if not trajs:
         return None
+    return predict_trajectories(fitted['net'], trajs)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# POOLED LSTM (pooled_lstm): one network for every catchment of the pool
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Same network, training loop, constants and configurations as the single
+# LSTM; the differences are confined to the inputs and the loss:
+#   - one-hot catchment ID (POOLED_CATCHMENTS order) appended to the
+#     standardised dynamic inputs at every step, raw 0/1 (not standardised);
+#     through the input projection it acts as a learned per-catchment offset
+#   - one dynamic-feature scaler over every catchment's training steps
+#   - NSE* loss (nse_star_loss), each catchment's errors scaled by its own
+#     training-years target spread
+# Each catchment keeps its own climatology and a0, fit on its own training
+# years, and its own training rule (only trajectories initialised in its
+# training years).
+
+class PooledTrajectoryDataset(TrajectoryDataset):
+    """Like TrajectoryDataset, with the per-step NSE* weight in place of the
+    climatology (collate_fn pads it the same way)."""
+
+    def __getitem__(self, idx):
+        t = self.trajs[idx]
+        return (torch.from_numpy(t['fc_dyn']),
+                torch.from_numpy(t['target']),
+                torch.from_numpy(np.full(len(t['target']), t['weight'],
+                                         dtype=np.float32)))
+
+
+def add_catchment_id(trajectories, index, n_catchments):
+    """Append the one-hot catchment ID (`index` of `n_catchments`) to every
+    step of every trajectory, in place, after standardisation."""
+    onehot = np.zeros(n_catchments, dtype=np.float32)
+    onehot[index] = 1.0
+    for traj in trajectories:
+        ids = np.broadcast_to(onehot, (len(traj['fc_dyn']), n_catchments))
+        traj['fc_dyn'] = np.concatenate([traj['fc_dyn'], ids],
+                                        axis=1).astype(np.float32)
+
+
+def _scored_targets(trajectories):
+    """Every finite target of the trajectories' scored steps."""
+    vals = [t['target'][t['scored'] & np.isfinite(t['target'])]
+            for t in trajectories]
+    return np.concatenate(vals) if vals else np.array([], dtype=np.float32)
+
+
+def fit_pooled_lstm(config, pool, cfolds):
+    """
+    Train the pooled LSTM for one configuration on one pooled fold.
+
+    `pool` is {catchment: seas5ml.pooled.PoolMember}; `cfolds` is
+    {catchment: that catchment's restriction of the fold}
+    (seas5ml.designs.restrict). For every catchment with training years:
+    its climatology and a0 are fit on its own tr_yrs | val_yrs (a0 written
+    into its frame in place), its training and early-stopping trajectories
+    are built from its own frame (only trajectories initialised in its
+    training years), and its NSE* weight 1 / (s_c + NSE_STAR_EPS)^2 is set
+    from the spread s_c of its training targets (tr_yrs steps). One scaler
+    is then fit over all catchments' training steps, the one-hot ID is
+    appended, and the network is trained as the single LSTM is.
+
+    Seeded with SEED at the start, like fit_lstm. Returns the fitted-model
+    dict (kind 'pooled_lstm'; `doy_clim` is {catchment: climatology}), or
+    None if no catchment has training data or none has early-stopping data.
+    """
+    from ..pooled import POOLED_CATCHMENTS, catchment_index
+
+    torch.manual_seed(SEED)
+    np.random.seed(SEED)
+
+    doy_clims, weights, sigmas, n_train = {}, {}, {}, {}
+    tr_all, val_all, fc_all = [], [], []
+    for c, f in cfolds.items():
+        m = pool[c]
+        train_years = set(f.tr_yrs) | set(f.val_yrs)
+        if not m.df[GROUP_COL].isin(f.tr_yrs).any():
+            continue            # no training data for this catchment here
+        doy_clims[c] = apply_fold_climatology(m.df, m.fit_clim, train_years)
+        tr, fc_list = raw_trajectories(m.df, doy_clims[c],
+                                       score_years=f.tr_yrs,
+                                       init_years=train_years)
+        val, _ = raw_trajectories(m.df, doy_clims[c], score_years=f.val_yrs,
+                                  init_years=train_years)
+        sigmas[c] = float(np.std(_scored_targets(tr)))
+        weights[c] = 1.0 / (sigmas[c] + NSE_STAR_EPS) ** 2
+        for t in tr + val:
+            t['weight'] = weights[c]
+            t['catchment'] = c
+        n_train[c] = len(tr)
+        tr_all += tr
+        val_all += val
+        fc_all += fc_list
+    if not tr_all or not val_all:
+        return None
+
+    dyn_sc = fit_dyn_scaler(fc_all)
+    apply_dyn_scaler(tr_all + val_all, dyn_sc)
+    n_id = len(POOLED_CATCHMENTS)
+    for c in doy_clims:
+        add_catchment_id([t for t in tr_all + val_all if t['catchment'] == c],
+                         catchment_index(c), n_id)
+
+    tr_loader = DataLoader(PooledTrajectoryDataset(tr_all),
+                           batch_size=config['batch'], shuffle=True,
+                           collate_fn=collate_fn, num_workers=0,
+                           pin_memory=True)
+    val_loader = DataLoader(PooledTrajectoryDataset(val_all),
+                            batch_size=config['batch'], shuffle=False,
+                            collate_fn=collate_fn, num_workers=0,
+                            pin_memory=True)
+
+    # n_dyn is the network's input width (dynamic features + catchment ID),
+    # so load_fitted rebuilds the network unchanged.
+    arch = {'n_dyn': len(DYN_VARS) + n_id, 'hidden': config['hidden'],
+            'n_layers': N_LAYERS, 'dropout': DROPOUT, 'n_id': n_id}
+    model = DischargeLSTM(arch['n_dyn'], arch['hidden'], arch['n_layers'],
+                          arch['dropout']).to(DEVICE)
+    best_epoch, best_val_loss, n_epochs = train_net(
+        model, tr_loader, val_loader, config, loss_fn=nse_star_loss)
+    return {'kind': 'pooled_lstm', 'model': 'pooled_lstm', 'config': config,
+            'net': model, 'dyn_scaler': dyn_sc, 'arch': arch,
+            'doy_clim': doy_clims, 'catchments': list(POOLED_CATCHMENTS),
+            'info': {'best_epoch': best_epoch,
+                     'best_val_loss': float(best_val_loss),
+                     'n_epochs': n_epochs,
+                     'n_train': len(tr_all),
+                     'n_train_by_catchment': n_train,
+                     'sigma_by_catchment': sigmas}}
+
+
+def predict_pooled_lstm(fitted, catchment, df_score, *, score_years):
+    """
+    `predict_lstm` for one catchment of a pooled model: that catchment's own
+    climatology (a0, targets, Q_clim), the shared scaler and its one-hot ID.
+    `df_score` is the catchment's frame (not modified). Returns a
+    per-member prediction frame, or None if nothing is scored.
+    """
+    if catchment not in fitted['doy_clim']:
+        raise ValueError(f"pooled model has no climatology for '{catchment}' "
+                         f"(it had no training data in this fold)")
+    doy_clim = fitted['doy_clim'][catchment]
+    df_score = set_a0(df_score.copy(), doy_clim)
+    trajs, _ = build_trajectories(df_score, doy_clim, fitted['dyn_scaler'],
+                                  False, score_years=score_years)
+    if not trajs:
+        return None
+    add_catchment_id(trajs, fitted['catchments'].index(catchment),
+                     fitted['arch']['n_id'])
     return predict_trajectories(fitted['net'], trajs)
 

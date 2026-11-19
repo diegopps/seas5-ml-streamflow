@@ -70,7 +70,7 @@ import pandas as pd
 from seas5ml import designs, models, paths, tuning
 from seas5ml.catchments import CATCHMENTS, SHARED
 from seas5ml.data import load_catchment
-from seas5ml.evaluate import ensemble_mean, score_frame, score_members
+from seas5ml.evaluate import ensemble_mean, year_rows
 from seas5ml.io_results import build_summary, write_folds, write_outputs
 from seas5ml.models import configs, references
 from seas5ml.models import lstm as lstm_mod
@@ -109,28 +109,6 @@ def parse_args():
 # ═══════════════════════════════════════════════════════════════════════
 # SCORING
 # ═══════════════════════════════════════════════════════════════════════
-
-def year_rows(fold, pred, *, ensemble, extra):
-    """
-    One metrics row per test year of `fold`. `pred` is a per-member frame
-    (ensemble=True) or a baseline's deterministic frame; `extra` holds the
-    per-fit values to record (config, n_train, best_epoch, phi, ...).
-    """
-    rows = []
-    for year in fold.test_years:
-        sub = pred[pred['hydro_year'] == year]
-        if len(sub) == 0:
-            continue
-        if ensemble:
-            scores = score_members(sub, test_year=year)
-            n_test = len(sub[['init_date', 'date']].drop_duplicates())
-        else:
-            scores = score_frame(sub)
-            n_test = len(sub)
-        rows.append({'fold': fold.id, 'hydro_year': year, **scores,
-                     'n_test': n_test, **extra})
-    return rows
-
 
 def print_header():
     print(f"  {'Fold':>9s}  {'HY':>6s}  {'NSE':>8s}  {'KGE':>8s}  "

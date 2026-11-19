@@ -6,8 +6,14 @@ rules (fold climatology and a0, training only on trajectories initialised in
 the training years, the early-stopping split) live in one place.
 
     fit(model, config, df, fit_clim=, tr_yrs=, val_yrs=)  -> fitted | None
-    predict(fitted, df, score_years=)                     -> member frame | None
+    fit_pooled(model, config, pool, cfolds)               -> fitted | None
+    predict(fitted, df, score_years=[, catchment=])       -> member frame | None
     save_fitted(fitted, path, meta=) / load_fitted(path)
+
+The pooled models (configs.POOLED_MODELS: pooled_lstm) train on every
+catchment of a pool at once (`fit_pooled`, one pooled fold: see
+seas5ml.pooled) and predict one catchment at a time (`predict` with
+`catchment`); their `doy_clim` is {catchment: climatology}.
 
 `model` is one of configs.LEARNED_MODELS; `config` comes from
 configs.DEFAULTS or configs.GRIDS. The LSTM trains on `tr_yrs` and
@@ -39,19 +45,35 @@ def fit(model, config, df, *, fit_clim, tr_yrs, val_yrs):
     raise ValueError(f"unknown learned model '{model}'")
 
 
-def predict(fitted, df, *, score_years):
+def fit_pooled(model, config, pool, cfolds):
+    """Train pooled `model` with `config` on one pooled fold: `pool` is
+    {catchment: seas5ml.pooled.PoolMember}, `cfolds` {catchment: its
+    restriction of the fold} (see seas5ml.pooled)."""
+    if model == 'pooled_lstm':
+        return lstm.fit_pooled_lstm(config, pool, cfolds)
+    raise ValueError(f"unknown pooled model '{model}'")
+
+
+def predict(fitted, df, *, score_years, catchment=None):
     """
     Per-member predictions for the rows of `df` verifying in `score_years`,
     against the model's own climatology. `df` is not modified. The LSTM reads
     every trajectory reaching those years whole, from lead 0; rows outside
-    `score_years` are input context only and are not returned.
+    `score_years` are input context only and are not returned. A pooled
+    model needs `catchment` (whose frame `df` is).
     """
     score_years = {int(y) for y in score_years}
     in_scored = df[GROUP_COL].isin(score_years)
-    if fitted['kind'] == 'lstm':
+    if fitted['kind'] in ('lstm', 'pooled_lstm'):
         inits = df.loc[in_scored, 'init_date'].unique()
-        return lstm.predict_lstm(fitted, df[df['init_date'].isin(inits)],
-                                 score_years=score_years)
+        df_traj = df[df['init_date'].isin(inits)]
+        if fitted['kind'] == 'lstm':
+            return lstm.predict_lstm(fitted, df_traj, score_years=score_years)
+        if catchment is None:
+            raise ValueError("a pooled model predicts one catchment at a "
+                             "time: pass `catchment`")
+        return lstm.predict_pooled_lstm(fitted, catchment, df_traj,
+                                        score_years=score_years)
     return tabular.predict_tabular(fitted, df[in_scored])
 
 
@@ -74,11 +96,13 @@ def save_fitted(fitted, path, *, meta=None):
     payload = {'kind': fitted['kind'], 'model': fitted['model'],
                'config': fitted['config'], 'doy_clim': fitted['doy_clim'],
                'info': fitted['info'], 'meta': meta or {}}
-    if fitted['kind'] == 'lstm':
+    if fitted['kind'] in ('lstm', 'pooled_lstm'):
         payload['state_dict'] = {k: v.cpu() for k, v
                                  in fitted['net'].state_dict().items()}
         payload['arch'] = fitted['arch']
         payload['dyn_scaler'] = fitted['dyn_scaler']
+        if fitted['kind'] == 'pooled_lstm':
+            payload['catchments'] = fitted['catchments']   # one-hot order
         torch.save(payload, path)
     else:
         payload['estimator'] = fitted['estimator']

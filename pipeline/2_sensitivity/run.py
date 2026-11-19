@@ -108,9 +108,8 @@ import pandas as pd
 from seas5ml import designs, models, paths, tuning
 from seas5ml import sensitivity as sens
 from seas5ml.catchments import CATCHMENTS
-from seas5ml.data import GROUP_COL, load_catchment
+from seas5ml.data import load_catchment
 from seas5ml.designs import SEED
-from seas5ml.evaluate import score_members
 from seas5ml.models import configs
 from seas5ml.models import lstm as lstm_mod
 
@@ -121,9 +120,7 @@ from seas5ml.models import lstm as lstm_mod
 VALID_MODELS = configs.LEARNED_MODELS
 TUNED_MODELS = configs.TUNED_MODELS             # rf, xgb, lstm
 
-# Salt for the final model's val split, keeping it distinct from every
-# fold's split seed while staying reproducible from SEED alone.
-FINAL_FIT_SALT = 20260803
+FINAL_FIT_SALT = sens.FINAL_FIT_SALT
 
 
 def parse_args():
@@ -324,43 +321,9 @@ def main():
 
         # Scenario frames per test year, built before training so a fold
         # without a usable donor costs nothing.
-        scenarios = {}
-        for test_year in fold.test_years:
-            # Every trajectory reaching the test year, whole: the LSTM reads
-            # it from initialisation; rows outside the test year are context.
-            test_inits = df.loc[df[GROUP_COL] == test_year, 'init_date'].unique()
-            if len(test_inits) == 0:
-                continue
-            df_test = df[df['init_date'].isin(test_inits)]
-            # Seeded per (seed, test year): the donor draw is reproducible
-            # and independent of the model.
-            fold_seed = int(np.random.SeedSequence(
-                [SEED, test_year]).generate_state(1)[0])
-            frames, donor_year, n_rows, n_dropped, donors = sens.build_scenarios(
-                df_test, df,
-                designs.donor_pool(design, fold, test_year, years),
-                test_year, fold_seed=fold_seed)
-            if donors['excluded']:
-                print(f"  {fold.id:>9s}  {test_year:6d}  note: "
-                      f"{donors['n_excluded']} of {donors['n_candidates']} "
-                      f"donor candidates supply < {sens.MIN_DONOR_SHARE:.0%} "
-                      f"of the year's rows, excluded: "
-                      + ", ".join(f"{y} ({s:.0%})" for y, s
-                                  in sorted(donors['excluded'].items())))
-            if frames is None:
-                print(f"  {fold.id:>9s}  {test_year:6d}  WARNING: no usable "
-                      f"donor year ({donors['n_candidates']} candidates, none "
-                      f"supplies >= {sens.MIN_DONOR_SHARE:.0%} of the year's "
-                      f"rows) -- test year SKIPPED, absent from the "
-                      f"sensitivity results")
-                skipped.append(test_year)
-                continue
-            if n_dropped:
-                print(f"  {fold.id:>9s}  {test_year:6d}  note: {n_dropped:,} "
-                      f"rows dropped from all scenarios (donor {donor_year} "
-                      f"lacks a match); {n_rows:,} retained")
-            scenarios[test_year] = (frames, donor_year, n_rows, n_dropped,
-                                    donors)
+        scenarios, skip = sens.test_year_scenarios(df, fold, design, years,
+                                                   tag=fold.id)
+        skipped += skip
         if not scenarios:
             continue
 
@@ -372,38 +335,8 @@ def main():
         if design == 'split':
             fold_model = (fold, config, fitted)
 
-        for test_year, (frames, donor_year, n_rows, n_dropped,
-                        donors) in scenarios.items():
-            for scenario in sens.SCENARIOS:
-                # Scored against the model's own (fold) climatology.
-                pred = models.predict(fitted, frames[scenario],
-                                      score_years=[test_year])
-                scores = score_members(pred, test_year=test_year)
-                if scores is None:
-                    continue
-                rows.append({
-                    'fold': fold.id,
-                    'hydro_year': test_year,
-                    'scenario': scenario,
-                    'model': model,
-                    'config': config['label'],
-                    'nse': scores['nse'], 'kge': scores['kge'],
-                    'acc': scores['acc'], 'crps': scores['crps'],
-                    'donor_year': donor_year if scenario == 'mixed' else np.nan,
-                    'n_rows': n_rows,
-                    'n_rows_dropped': n_dropped,
-                    'donor_share': round(donors['donor_share'], 4),
-                    'n_donor_candidates': donors['n_candidates'],
-                    'n_donors_excluded': donors['n_excluded'],
-                    'best_epoch': fitted['info'].get('best_epoch', np.nan),
-                    'time_s': round(time.time() - fold_t0, 1),
-                })
-                donor_str = str(donor_year) if scenario == 'mixed' else '-'
-                print(f"  {fold.id:>9s}  {test_year:6d}  {scenario:>8s}  "
-                      f"{scores['nse']:+8.3f}  {scores['kge']:+8.3f}  "
-                      f"{scores['acc']:+8.3f}  {scores['crps']:9.3f}  "
-                      f"{donor_str:>6s}  {time.time() - fold_t0:5.0f}s",
-                      flush=True)
+        rows += sens.scenario_rows(fitted, scenarios, fold=fold, model=model,
+                                   config=config, t0=fold_t0, tag=fold.id)
 
     if skipped:
         print(f"\n  WARNING: {len(skipped)} test year(s) skipped, no usable "
@@ -412,23 +345,9 @@ def main():
         print("\nERROR: no folds produced results.")
         sys.exit(1)
 
+    # Fold metrics, plus the per-scenario summary the figure is built from.
     mdf = pd.DataFrame(rows)
-    mdf.to_csv(out_dir / 'sensitivity_fold_metrics.csv', index=False)
-
-    # ── Summary + the paired deltas the figure is built from ─────────
-    summary = []
-    for scenario in sens.SCENARIOS:
-        s = mdf[mdf['scenario'] == scenario]
-        if len(s) == 0:
-            continue
-        row = {'catchment': catchment, 'model': model,
-               'scenario': scenario, 'n_years': len(s)}
-        for metric in ('nse', 'kge', 'acc', 'crps'):
-            row[f'{metric}_mean'] = round(s[metric].mean(), 4)
-            row[f'{metric}_std'] = round(s[metric].std(), 4)
-        summary.append(row)
-    pd.DataFrame(summary).to_csv(out_dir / 'sensitivity_summary.csv',
-                                 index=False)
+    sens.write_results(out_dir, mdf, catchment=catchment, model=model)
 
     # ── 4. Final model ────────────────────────────────────────────────
     # split: the fold model itself (trained on the hindcast years, scored
@@ -450,29 +369,7 @@ def main():
         fit_and_save_final(design, catchment, model, folds, df=df,
                            fit_clim=fit_clim, years=years)
 
-    print(f"\n  Scenario means ({model.upper()}):")
-    pivot = mdf.pivot_table(index='scenario',
-                            values=['nse', 'kge', 'acc', 'crps'],
-                            aggfunc='mean').reindex(list(sens.SCENARIOS))
-    for scenario, r in pivot.iterrows():
-        print(f"    {scenario:>8s}  NSE={r['nse']:+.4f}  KGE={r['kge']:+.4f}  "
-              f"ACC={r['acc']:+.4f}  CRPS={r['crps']:.4f}")
-
-    print(f"\n  Median paired delta vs. normal "
-          f"(positive = corruption hurt skill):")
-    base = mdf[mdf.scenario == 'normal'].set_index('hydro_year')
-    for scenario in [s for s in sens.SCENARIOS if s != 'normal']:
-        cor = mdf[mdf.scenario == scenario].set_index('hydro_year')
-        common = base.index.intersection(cor.index)
-        if len(common) == 0:
-            continue
-        parts = []
-        for metric in ('nse', 'kge', 'acc'):
-            d = np.median(base.loc[common, metric] - cor.loc[common, metric])
-            parts.append(f"{metric.upper()}={d:+.4f}")
-        d_crps = np.median(cor.loc[common, 'crps'] - base.loc[common, 'crps'])
-        parts.append(f"CRPS={d_crps:+.4f}")
-        print(f"    {scenario:>8s}  {'  '.join(parts)}")
+    sens.print_summary(mdf, model)
 
     print(f"\nSaved outputs to {out_dir}/")
     print(f"DONE in {(time.time() - t0) / 60:.1f} minutes")

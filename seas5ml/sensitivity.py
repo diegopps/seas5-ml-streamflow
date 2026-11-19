@@ -89,6 +89,8 @@ rule is the same under every design. A test year with no usable candidate
 is skipped (the caller warns).
 """
 
+import time
+
 import numpy as np
 import pandas as pd
 
@@ -103,6 +105,10 @@ SCENARIOS = ('normal', 'mixed')
 
 # Fixed salt keeping the donor draw reproducible from the fold seed alone.
 DONOR_SALT = 811
+
+# Salt for the loyo final model's val split (stage 2), keeping it distinct
+# from every fold's split seed while staying reproducible from SEED alone.
+FINAL_FIT_SALT = 20260803
 
 # A candidate donor year must be able to supply at least this share of the
 # test year's rows (see `usable_donors`); others leave the pool.
@@ -262,4 +268,157 @@ def build_scenarios(df_test, df_full, donor_candidates, test_year, *,
 
     frames = {'normal': df_base, 'mixed': df_mixed}
     return frames, donor_year, int((in_test & matched).sum()), n_dropped, donors
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# ONE FOLD, ONE CATCHMENT (shared by stage 2's single and pooled drivers)
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_year_scenarios(df, fold, design, years, *, tag):
+    """
+    The scenario frames of every test year of `fold` for one catchment
+    (`df` its analysis frame, `years` its hydro years), built before any
+    training so a fold without a usable donor costs nothing. The donor pool
+    is designs.donor_pool's, filtered by `usable_donors`; the draw is seeded
+    per (SEED, test year), independent of the model. `tag` labels the
+    printed notes (the fold id; the pooled driver adds the catchment).
+
+    Returns ({test_year: (frames, donor_year, n_rows, n_dropped, donors)},
+    [test years skipped for want of a usable donor]).
+    """
+    from .designs import SEED, donor_pool
+
+    scenarios, skipped = {}, []
+    for test_year in fold.test_years:
+        # Every trajectory reaching the test year, whole: the LSTM reads
+        # it from initialisation; rows outside the test year are context.
+        test_inits = df.loc[df[GROUP_COL] == test_year, 'init_date'].unique()
+        if len(test_inits) == 0:
+            continue
+        df_test = df[df['init_date'].isin(test_inits)]
+        # Seeded per (seed, test year): the donor draw is reproducible
+        # and independent of the model.
+        fold_seed = int(np.random.SeedSequence(
+            [SEED, test_year]).generate_state(1)[0])
+        frames, donor_year, n_rows, n_dropped, donors = build_scenarios(
+            df_test, df, donor_pool(design, fold, test_year, years),
+            test_year, fold_seed=fold_seed)
+        if donors['excluded']:
+            print(f"  {tag:>9s}  {test_year:6d}  note: "
+                  f"{donors['n_excluded']} of {donors['n_candidates']} "
+                  f"donor candidates supply < {MIN_DONOR_SHARE:.0%} "
+                  f"of the year's rows, excluded: "
+                  + ", ".join(f"{y} ({s:.0%})" for y, s
+                              in sorted(donors['excluded'].items())))
+        if frames is None:
+            print(f"  {tag:>9s}  {test_year:6d}  WARNING: no usable "
+                  f"donor year ({donors['n_candidates']} candidates, none "
+                  f"supplies >= {MIN_DONOR_SHARE:.0%} of the year's "
+                  f"rows) -- test year SKIPPED, absent from the "
+                  f"sensitivity results")
+            skipped.append(test_year)
+            continue
+        if n_dropped:
+            print(f"  {tag:>9s}  {test_year:6d}  note: {n_dropped:,} "
+                  f"rows dropped from all scenarios (donor {donor_year} "
+                  f"lacks a match); {n_rows:,} retained")
+        scenarios[test_year] = (frames, donor_year, n_rows, n_dropped, donors)
+    return scenarios, skipped
+
+
+def scenario_rows(fitted, scenarios, *, fold, model, config, t0, tag,
+                  catchment=None):
+    """
+    Score both scenarios of every test year in `scenarios`
+    (`test_year_scenarios`) with the fitted model, against its own (fold)
+    climatology. One sensitivity_fold_metrics.csv row per (test year,
+    scenario), printed as it comes; `t0` is the fold's start time, `tag` the
+    printed label. `catchment` is passed to a pooled model's predict.
+    """
+    from . import models
+    from .evaluate import score_members
+
+    predict_kw = {} if catchment is None else {'catchment': catchment}
+    rows = []
+    for test_year, (frames, donor_year, n_rows, n_dropped,
+                    donors) in scenarios.items():
+        for scenario in SCENARIOS:
+            pred = models.predict(fitted, frames[scenario],
+                                  score_years=[test_year], **predict_kw)
+            scores = score_members(pred, test_year=test_year)
+            if scores is None:
+                continue
+            rows.append({
+                'fold': fold.id,
+                'hydro_year': test_year,
+                'scenario': scenario,
+                'model': model,
+                'config': config['label'],
+                'nse': scores['nse'], 'kge': scores['kge'],
+                'acc': scores['acc'], 'crps': scores['crps'],
+                'donor_year': donor_year if scenario == 'mixed' else np.nan,
+                'n_rows': n_rows,
+                'n_rows_dropped': n_dropped,
+                'donor_share': round(donors['donor_share'], 4),
+                'n_donor_candidates': donors['n_candidates'],
+                'n_donors_excluded': donors['n_excluded'],
+                'best_epoch': fitted['info'].get('best_epoch', np.nan),
+                'time_s': round(time.time() - t0, 1),
+            })
+            donor_str = str(donor_year) if scenario == 'mixed' else '-'
+            print(f"  {tag:>9s}  {test_year:6d}  {scenario:>8s}  "
+                  f"{scores['nse']:+8.3f}  {scores['kge']:+8.3f}  "
+                  f"{scores['acc']:+8.3f}  {scores['crps']:9.3f}  "
+                  f"{donor_str:>6s}  {time.time() - t0:5.0f}s",
+                  flush=True)
+    return rows
+
+
+def write_results(out_dir, mdf, *, catchment, model):
+    """sensitivity_fold_metrics.csv (the rows) and sensitivity_summary.csv
+    (per-scenario mean and std of every metric) into `out_dir`."""
+    import os
+    os.makedirs(out_dir, exist_ok=True)
+    mdf.to_csv(os.path.join(out_dir, 'sensitivity_fold_metrics.csv'),
+               index=False)
+    summary = []
+    for scenario in SCENARIOS:
+        s = mdf[mdf['scenario'] == scenario]
+        if len(s) == 0:
+            continue
+        row = {'catchment': catchment, 'model': model,
+               'scenario': scenario, 'n_years': len(s)}
+        for metric in ('nse', 'kge', 'acc', 'crps'):
+            row[f'{metric}_mean'] = round(s[metric].mean(), 4)
+            row[f'{metric}_std'] = round(s[metric].std(), 4)
+        summary.append(row)
+    pd.DataFrame(summary).to_csv(
+        os.path.join(out_dir, 'sensitivity_summary.csv'), index=False)
+
+
+def print_summary(mdf, model):
+    """Scenario means and the median paired delta vs. normal, to the log."""
+    print(f"\n  Scenario means ({model.upper()}):")
+    pivot = mdf.pivot_table(index='scenario',
+                            values=['nse', 'kge', 'acc', 'crps'],
+                            aggfunc='mean').reindex(list(SCENARIOS))
+    for scenario, r in pivot.iterrows():
+        print(f"    {scenario:>8s}  NSE={r['nse']:+.4f}  KGE={r['kge']:+.4f}  "
+              f"ACC={r['acc']:+.4f}  CRPS={r['crps']:.4f}")
+
+    print(f"\n  Median paired delta vs. normal "
+          f"(positive = corruption hurt skill):")
+    base = mdf[mdf.scenario == 'normal'].set_index('hydro_year')
+    for scenario in [s for s in SCENARIOS if s != 'normal']:
+        cor = mdf[mdf.scenario == scenario].set_index('hydro_year')
+        common = base.index.intersection(cor.index)
+        if len(common) == 0:
+            continue
+        parts = []
+        for metric in ('nse', 'kge', 'acc'):
+            d = np.median(base.loc[common, metric] - cor.loc[common, metric])
+            parts.append(f"{metric.upper()}={d:+.4f}")
+        d_crps = np.median(cor.loc[common, 'crps'] - base.loc[common, 'crps'])
+        parts.append(f"CRPS={d_crps:+.4f}")
+        print(f"    {scenario:>8s}  {'  '.join(parts)}")
 

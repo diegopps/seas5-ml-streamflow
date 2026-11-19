@@ -63,7 +63,7 @@ def default_results_dir() -> str:
 
 # climatology and persistence are absent by design: they never read the met
 # forcing, so corrupting it is a no-op for them and the test is vacuous.
-SENS_MODELS = ["ridge", "rf", "xgb", "lstm"]
+SENS_MODELS = ["ridge", "rf", "xgb", "lstm", "pooled_lstm"]
 
 CORRUPT_SCENARIOS = ["mixed"]
 SCENARIO_LABELS = {"mixed": "False Year"}
@@ -302,7 +302,7 @@ def plot_sensitivity(catchments: list, results_dir: str, out_name: str):
             ax.set_ylim(lo, hi)
             _annotate_offscale(ax, data, pos, lo, hi)
 
-            # Four strips leave room for model names under them at print
+            # Five strips leave room for model names under them at print
             # width, so they are kept alongside the legend's colours.
             ax.set_xticks(tick_pos)
             ax.set_xticklabels([pl.MODEL_LABELS_BAR[m] for m in SENS_MODELS],

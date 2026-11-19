@@ -54,7 +54,7 @@ import matplotlib.lines as mlines
 from . import common as pl
 from ..metrics import calc_nse, calc_kge, calc_acc, crps_from_pred_df
 
-# Built at print size (pl.FIG_WIDTH_IN wide). Seven boxes per panel leave no
+# Built at print size (pl.FIG_WIDTH_IN wide). Eight boxes per panel leave no
 # room for model names under them at this width, so boxes are identified by
 # colour and the shared legend only.
 BAR_FIG_HEIGHT_ROW = 1.7    # inches per catchment row

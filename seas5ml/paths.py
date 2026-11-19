@@ -15,6 +15,7 @@ Every output path is built here and nowhere else:
         default/<catchment>/<model>/        stage 1, default configs (all folds)
         tuned/<catchment>/<model>/fold_<id>/  stage 1, nested-CV tuning (one fold)
         sensitivity/<catchment>/<model>/    stage 2
+        <kind>/_pooled/<model>/             pooled models: checkpoints, pool-level records
         figures/                            plot-script outputs
     data/results/paper_figures/{main,appendix}/   stage 3
     data/trained_models/<design>/           stage 2 final all-years models
@@ -75,6 +76,17 @@ def run_dir(design: str, kind: str, catchment: str, model: str) -> Path:
 def fold_dir(design: str, catchment: str, model: str, fold_id: str) -> Path:
     """Results of one tuned fold (inner CV, winner and its test score)."""
     return run_dir(design, "tuned", catchment, model) / f"fold_{fold_id}"
+
+
+def pooled_work_dir(design: str, kind: str, model: str) -> Path:
+    """
+    Pool-level working folder of a pooled model (seas5ml.pooled):
+    data/results/<design>/<kind>/_pooled/<model>/. Holds the per-fold
+    checkpoints a restarted job resumes from (removed once the per-catchment
+    results are assembled) and the tuned run's pool-level inner-CV record.
+    The per-catchment results go to run_dir / fold_dir as for every model.
+    """
+    return kind_dir(design, kind) / "_pooled" / model
 
 
 def figures_dir(design: str) -> Path:

@@ -61,3 +61,27 @@ def score_members(pred_df: pd.DataFrame, test_year=None):
     scores['crps'] = crps_from_pred_df(pred_df)
     return scores
 
+
+def year_rows(fold, pred, *, ensemble, extra):
+    """
+    One metrics row per test year of `fold` (a seas5ml.designs.Fold): the
+    rows of fold_metrics.csv. `pred` is a per-member frame (ensemble=True)
+    or a baseline's deterministic frame; `extra` holds the per-fit values to
+    record (config, n_train, best_epoch, phi, ...). Years without rows in
+    `pred` give no row.
+    """
+    rows = []
+    for year in fold.test_years:
+        sub = pred[pred['hydro_year'] == year]
+        if len(sub) == 0:
+            continue
+        if ensemble:
+            scores = score_members(sub, test_year=year)
+            n_test = len(sub[['init_date', 'date']].drop_duplicates())
+        else:
+            scores = score_frame(sub)
+            n_test = len(sub)
+        rows.append({'fold': fold.id, 'hydro_year': year, **scores,
+                     'n_test': n_test, **extra})
+    return rows
+

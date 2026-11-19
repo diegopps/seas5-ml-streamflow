@@ -9,7 +9,8 @@ boxplots):
   04b_tuningvsreference_long.pdf  — lead_day 185-214
 
 Every panel places two grey/blue reference boxes (climatology, damped
-persistence) beside a pair of boxes per tuned model (rf, xgb, lstm): the
+persistence) beside a pair of boxes per tuned model (rf, xgb, lstm,
+pooled_lstm): the
 untuned default-hyperparameter distribution (hatched) and the nested-CV
 winner's distribution (solid).
 
@@ -81,7 +82,7 @@ from .boxplots import (fold_metrics_in_window, window_crps, window_crpss,
                             DOY_REF_COLOR, DOY_REF_LABEL, Y_LIM,
                             draw_below_floor_counts)
 
-TUNED_MODELS = ["rf", "xgb", "lstm"]
+TUNED_MODELS = ["rf", "xgb", "lstm", "pooled_lstm"]
 REF_MODELS = ["climatology", "damped_persistence"]
 
 METRICS = [

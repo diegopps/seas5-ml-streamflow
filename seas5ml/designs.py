@@ -137,6 +137,44 @@ def get_fold(design: str, years, fold_id) -> Fold:
                      f"years {list(years)}")
 
 
+def restrict(fold: Fold, years) -> Fold:
+    """
+    `fold` restricted to the hydro `years` of one catchment: every year list
+    intersected with `years`, id and index kept. Used by the pooled model
+    (seas5ml.pooled), whose folds are built over the union of every
+    catchment's years: a catchment without any of the fold's test years
+    keeps its training years (it trains in that fold) and has no test years
+    (it is not scored there). The early-stopping years stay those drawn for
+    the whole pool, so every catchment early-stops on the same calendar
+    years; a catchment may have none of them.
+    """
+    keep = {int(y) for y in years}
+    return Fold(index=fold.index, id=fold.id,
+                train_years=tuple(y for y in fold.train_years if y in keep),
+                test_years=tuple(y for y in fold.test_years if y in keep),
+                tr_yrs=frozenset(y for y in fold.tr_yrs if y in keep),
+                val_yrs=frozenset(y for y in fold.val_yrs if y in keep))
+
+
+def restrict(fold: Fold, years) -> Fold:
+    """
+    `fold` restricted to one catchment's hydro `years`: every year list
+    intersected with them, id and index kept. Used by the pooled models
+    (seas5ml.pooled), whose folds are built over the union of all catchments'
+    years: under loyo a catchment's restriction then has exactly the training
+    and test years of its own single-catchment fold for the same test year.
+    The early-stopping years are the pooled fold's, shared by every
+    catchment. A catchment without any of the fold's test years still trains
+    in it (empty test_years); it is just not scored.
+    """
+    ys = {int(y) for y in years}
+    return Fold(index=fold.index, id=fold.id,
+                train_years=tuple(y for y in fold.train_years if y in ys),
+                test_years=tuple(y for y in fold.test_years if y in ys),
+                tr_yrs=frozenset(fold.tr_yrs & ys),
+                val_yrs=frozenset(fold.val_yrs & ys))
+
+
 def check_sources(design: str, design_folds, df) -> None:
     """
     Check a design's folds against the SEAS5 source of the analysis frame
