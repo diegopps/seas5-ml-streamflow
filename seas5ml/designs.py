@@ -20,6 +20,21 @@ several test years gives several rows.
 Designs
     loyo   leave-one-hydro-year-out: one fold per hydro year, testing on that
            year and training on all others.
+    split  train on hindcasts, test on operational forecasts: one fold
+           (id SPLIT_FOLD_ID), training on the hydro years up to
+           SPLIT_TRAIN_LAST and testing on those from SPLIT_TEST_FIRST.
+           SEAS5 hindcasts (25 members) cover inits up to Dec 2016 and the
+           operational forecasts (51 members) start in Jan 2017, so every row
+           verifying in a training year comes from a hindcast and every row
+           verifying in a test year from an operational forecast. The years
+           in between (hydro year 2017, the only one mixing both) are a
+           buffer, neither trained on nor scored. Stage 0 checks both sides
+           against the data's `source` column.
+
+The split runs through exactly the same code as loyo: a fold is used the same
+way whatever its design (climatology, a0, phi and model fit on its training
+years; the same early-stopping rule; scored on its test years). Only the
+donor pool of the sensitivity test differs (see `donor_pool`).
 
 Every split is seeded, so every model and every stage sees identical folds.
 """
@@ -31,8 +46,13 @@ import numpy as np
 SEED = 107          # global seed: fold splits, model initialisation
 VAL_FRAC = 0.15     # share of a fold's training years held for early stopping
 
-DESIGNS = ("loyo",)
+DESIGNS = ("loyo", "split")
 DEFAULT_DESIGN = "loyo"
+
+# split design: last hindcast-only and first operational-only hydro year.
+SPLIT_TRAIN_LAST = 2016
+SPLIT_TEST_FIRST = 2018
+SPLIT_FOLD_ID = "hindcast"
 
 
 @dataclass(frozen=True)
@@ -75,7 +95,21 @@ def _loyo(years, seed):
     return folds
 
 
-_BUILDERS = {"loyo": _loyo}
+def _split(years, seed):
+    train_years = [y for y in years if y <= SPLIT_TRAIN_LAST]
+    test_years = [y for y in years if y >= SPLIT_TEST_FIRST]
+    if not train_years or not test_years:
+        # No fold: stage 0 writes an empty manifest and warns.
+        return []
+    # One fold, index 0: same seed rule as loyo (fold index + global seed).
+    tr_yrs, val_yrs = _val_split(train_years, seed=0 + seed)
+    return [Fold(index=0, id=SPLIT_FOLD_ID,
+                 train_years=tuple(train_years),
+                 test_years=tuple(test_years),
+                 tr_yrs=tr_yrs, val_yrs=val_yrs)]
+
+
+_BUILDERS = {"loyo": _loyo, "split": _split}
 
 
 def check_design(design: str) -> str:
@@ -103,7 +137,15 @@ def get_fold(design: str, years, fold_id) -> Fold:
 def donor_pool(design: str, fold: Fold, test_year: int, years) -> list:
     """
     Hydro years the sensitivity test may draw a donor year's forcing from
-    when scoring `test_year` of `fold`. Under loyo: every other hydro year.
+    when scoring `test_year` of `fold`.
+
+      loyo   every other hydro year.
+      split  the fold's other test years: operational forecasts like the
+             test year's own, so the donor forcing has the same 51 members
+             (a 25-member hindcast donor would be wrapped onto the 51 test
+             members, giving the mixed ensemble only 25 distinct forcings
+             and shrinking its spread) and comes from the same era.
     """
-    check_design(design)
+    if check_design(design) == "split":
+        return [int(y) for y in fold.test_years if y != test_year]
     return [int(y) for y in years if y != test_year]
