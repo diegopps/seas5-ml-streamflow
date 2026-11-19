@@ -204,28 +204,32 @@ def doy_reference_acc(catchment: str, lo: int, hi: int, min_rows=30):
     model trained on day-of-year features alone.
 
     Forecast and observed anomalies share one reference: the forecast is built
-    from exactly the fold's training years (every fold year but `hy`), the
-    same years the fold's climatology was fit on, and is scored against that
-    fold climatology (the scaffold's Q_clim). A reference that included the
-    test year would correlate the forecast anomaly negatively with the
-    observed one (Barnston & van den Dool 1993) and bias this ACC low.
+    from exactly the fold's training years (read from the scaffold run's
+    folds.csv, common.load_folds), the same years the fold's climatology was
+    fit on, and is scored against that fold climatology (the scaffold's
+    Q_clim). A reference that included the test year would correlate the
+    forecast anomaly negatively with the observed one (Barnston & van den
+    Dool 1993) and bias this ACC low.
     """
     scaffold = pl.load_predictions(catchment, DOY_REF_SCAFFOLD)
     if scaffold is None:
         return None
+    train_years = pl.load_folds(catchment, DOY_REF_SCAFFOLD)
+    if train_years is None:
+        print(f"  {catchment}: no folds.csv in the {DOY_REF_SCAFFOLD} default "
+              f"run -- day-of-year reference skipped (rerun that run)")
+        return None
     from ..data import hydro_year_of
     obs = _climatology_period_obs(catchment)
     obs_hy = hydro_year_of(obs.index)
-    # The scaffold holds one fold per scored hydro year; fold years = CV years.
-    fold_years = set(scaffold['hydro_year'].astype(int).unique().tolist())
 
     sub = (scaffold[(scaffold['lead_day'] >= lo) & (scaffold['lead_day'] <= hi)]
              .dropna(subset=['Q_raw', 'Q_clim']))
     rows = {}
     for hy, g in sub.groupby('hydro_year'):
-        if len(g) < min_rows:
+        if len(g) < min_rows or int(hy) not in train_years:
             continue
-        train = obs[np.isin(obs_hy, list(fold_years - {int(hy)}))]
+        train = obs[np.isin(obs_hy, list(train_years[int(hy)]))]
         doy_mean = (np.log1p(train).groupby(train.index.dayofyear).mean()
                       .reindex(range(1, 367)).ffill().bfill())
         q_pred = np.expm1(g['date'].dt.dayofyear.map(doy_mean).values)

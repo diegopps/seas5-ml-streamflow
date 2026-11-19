@@ -329,6 +329,23 @@ def load_fold_metrics(catchment: str, model: str):
     return pd.read_csv(path)
 
 
+def load_folds(catchment: str, model: str):
+    """
+    Training years of every test year, from a default run's folds.csv
+    (io_results.write_folds), as {test hydro year: set of training hydro
+    years}; None if the run has no folds.csv.
+    """
+    path = paths.run_dir(DESIGN, "default", catchment, model) / "folds.csv"
+    if not path.exists():
+        return None
+    out = {}
+    for row in pd.read_csv(path, dtype=str).itertuples():
+        train = {int(y) for y in row.train_years.split()}
+        for y in row.test_years.split():
+            out[int(y)] = train
+    return out
+
+
 def load_predictions(catchment: str, model: str):
     """Default run's predictions_daily.parquet for one (catchment, model),
     or None."""

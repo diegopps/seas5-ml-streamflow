@@ -7,8 +7,10 @@ Every run writes the same artefacts to its results directory
     predictions_daily.parquet ensemble-mean daily predictions
     summary.csv               single-row aggregate over the scored years
                               (default variant only)
+    folds.csv                 the folds the run used: id, test and training
+                              years (default variant only; see write_folds)
 
-Ensemble models write a fourth:
+Ensemble models also write:
     predictions_members.parquet   per-member daily predictions
 
 CRPS cannot be recomputed from the ensemble mean, so any CRPS scored over a
@@ -17,6 +19,21 @@ subset of lead days (the boxplot windows) needs the member frame kept on disk.
 
 import os
 import pandas as pd
+
+
+def write_folds(out_dir, folds) -> None:
+    """
+    Write folds.csv: one row per fold (seas5ml.designs.Fold) with its id and
+    its test and training hydro years (space-separated). Figures that need a
+    year's training years read them from here (plots.common.load_folds)
+    instead of rebuilding the design's folds.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    pd.DataFrame([{
+        'fold': f.id,
+        'test_years': ' '.join(str(int(y)) for y in f.test_years),
+        'train_years': ' '.join(str(int(y)) for y in f.train_years),
+    } for f in folds]).to_csv(os.path.join(out_dir, 'folds.csv'), index=False)
 
 MEMBER_COLS = ['date', 'init_date', 'member', 'lead_day', 'hydro_year',
                'Q_raw', 'Q_pred', 'Q_clim']

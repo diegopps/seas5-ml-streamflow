@@ -71,7 +71,7 @@ from seas5ml import designs, models, paths, tuning
 from seas5ml.catchments import CATCHMENTS, SHARED
 from seas5ml.data import load_catchment
 from seas5ml.evaluate import ensemble_mean, score_frame, score_members
-from seas5ml.io_results import build_summary, write_outputs
+from seas5ml.io_results import build_summary, write_folds, write_outputs
 from seas5ml.models import configs, references
 from seas5ml.models import lstm as lstm_mod
 
@@ -159,7 +159,8 @@ def run_default_model(name, *, catchment, design, df, years, fit_clim):
     print_header()
 
     rows, daily, members = [], [], []
-    for fold in designs.folds(design, years):
+    folds = designs.folds(design, years)
+    for fold in folds:
         t_fold = time.time()
         if baseline:
             pred, info = references.predict_baseline(name, df, fit_clim, fold)
@@ -217,6 +218,7 @@ def run_default_model(name, *, catchment, design, df, years, fit_clim):
     write_outputs(out_dir, mdf, pd.concat(daily, ignore_index=True), summary,
                   members=(pd.concat(members, ignore_index=True)
                            if members else None))
+    write_folds(out_dir, folds)
     print(f"  Saved {out_dir}/")
 
 
