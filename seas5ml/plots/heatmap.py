@@ -20,7 +20,8 @@ Output:
 Cell handling:
   - Each cell's ACC is computed across the years contributing to that
     (init-month, lead-bin) combination.
-  - Cells with fewer than MIN_YEARS contributing years are blanked (grey),
+  - Cells with fewer than min_years() contributing years (per design:
+    MIN_YEARS_BY_DESIGN) are blanked (grey),
     to avoid showing striking-but-hollow ACC values off a handful of years.
   - Diverging colormap centred at 0 (ACC has a meaningful no-skill zero),
     symmetric shared scale across every panel.
@@ -40,8 +41,17 @@ from ..metrics import calc_acc
 # predicted anomaly).
 HEATMAP_MODEL_ORDER = [m for m in pl.MODEL_ORDER if m != "climatology"]
 
-# Minimum number of contributing YEARS for a cell's ACC to be shown.
-MIN_YEARS = 10
+# Minimum number of contributing YEARS for a cell's ACC to be shown, per
+# design. The split has only 3-8 test years per catchment, so 10 would blank
+# every cell; at 6, Central Asia (8 test years) and Kirchbichl (7, one of
+# them Oct-Dec only) show and Diepoldsau (4) stays blank. With 6-8 years a
+# split cell is descriptive only.
+MIN_YEARS_BY_DESIGN = {"loyo": 10, "split": 6}
+
+
+def min_years() -> int:
+    """MIN_YEARS of the selected design (plots.common.DESIGN)."""
+    return MIN_YEARS_BY_DESIGN[pl.DESIGN]
 
 # Minimum daily samples within a (year, cell) for that year to count
 # toward the cell (mirrors the >10-day guard used in the lead-time plot).
@@ -70,7 +80,7 @@ def compute_heatmap(df):
     Build the (init_month x lead_bin) ACC grid for one (catchment, model).
 
     For each cell, collect years with >= MIN_DAYS_PER_YEAR_CELL daily samples;
-    if at least MIN_YEARS such years exist, compute ACC pooled across those
+    if at least min_years() such years exist, compute ACC pooled across those
     years' daily anomaly pairs, otherwise leave the cell NaN (blanked).
 
     Returns a 12 x len(LEAD_BINS) array, rows = init months 1..12.
@@ -96,7 +106,7 @@ def compute_heatmap(df):
                 continue
             contributing_years = [y for y, g in cell.groupby('hydro_year')
                                   if len(g) >= MIN_DAYS_PER_YEAR_CELL]
-            if len(contributing_years) >= MIN_YEARS:
+            if len(contributing_years) >= min_years():
                 sub = cell[cell['hydro_year'].isin(contributing_years)]
                 acc_grid[im - 1, bi] = calc_acc(
                     sub['Q_raw'].values, sub['Q_pred'].values, sub['Q_clim'].values)
@@ -186,7 +196,7 @@ def _plot_grid(catchments: list, out_name: str, title_suffix: str = "",
     fig.supylabel("Initialisation month", fontsize=pl.FONT_AXIS_LABEL)
 
     if pl.SHOW_SUPTITLE:
-        title = "LOGO-CV ACC by Lead Time × Init Month"
+        title = f"{pl.design_label()} ACC by Lead Time × Init Month"
         if title_suffix:
             title += f" - {title_suffix}"
         fig.suptitle(title, fontsize=pl.FONT_SUPTITLE, fontweight='bold')

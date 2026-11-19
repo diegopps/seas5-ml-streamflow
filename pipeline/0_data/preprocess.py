@@ -13,7 +13,9 @@ Reads catchment definitions from seas5ml/catchments.py.
 
 Output:
     data/processed_data/<catchment_id>_features.parquet
-    data/processed_data/<catchment_id>_folds_<design>.txt   (fold manifests)
+    data/processed_data/<catchment_id>_folds_<design>.txt   (fold manifests,
+        one per evaluation design in seas5ml.designs.DESIGNS: loyo, split;
+        written only if the folds pass designs.check_sources)
 
 Schema (one row per date × init_date × member):
     date, init_date, member, lead_day, source,
@@ -449,8 +451,14 @@ def main():
     # (one Slurm job per fold) instead of a hardcoded per-catchment list,
     # which silently went stale whenever skip_years or the discharge record
     # changed.
+    #
+    # Every design's folds are built and checked (designs.check_sources:
+    # under split, training years hindcast-only and test years
+    # operational-only) before any manifest is written. On a failed check
+    # the catchment's manifests are removed: they described the feature
+    # table this run has just replaced, and a stale split manifest would let
+    # the tuned submit script start jobs on a split that does not hold.
     frame, fold_years = build_analysis_frame(out_path, obs_daily_q, SKIP_YEARS)
-    del frame
     if not fold_years:
         raise ValueError(
             f"{CATCHMENT_ID}: build_analysis_frame() returned no hydro years — "
@@ -459,12 +467,27 @@ def main():
             f"fold manifest."
         )
     print(f"  {len(fold_years)} hydro years ({fold_years[0]}-{fold_years[-1]})")
-    for design in designs.DESIGNS:
-        fold_ids = [f.id for f in designs.folds(design, fold_years)]
+    design_folds = {d: designs.folds(d, fold_years) for d in designs.DESIGNS}
+    try:
+        for design, folds in design_folds.items():
+            designs.check_sources(design, folds, frame)
+    except ValueError:
+        for design in designs.DESIGNS:
+            fold_manifest_path(design, CATCHMENT_ID).unlink(missing_ok=True)
+        print(f"  ERROR: fold check failed -- removed {CATCHMENT_ID}'s fold "
+              f"manifests")
+        raise
+    del frame
+    for design, folds in design_folds.items():
+        fold_ids = [f.id for f in folds]
         fold_path = fold_manifest_path(design, CATCHMENT_ID)
         with open(fold_path, 'w') as fh:
             fh.write(' '.join(fold_ids) + '\n')
         print(f"  Fold manifest ({design}, {len(fold_ids)} folds): {fold_path}")
+        if not fold_ids:
+            print(f"  WARNING: design '{design}' has no fold for "
+                  f"{CATCHMENT_ID} (empty manifest; its stage-1 tuned jobs "
+                  f"will be skipped)")
 
     file_size = os.path.getsize(out_path) / 1e6
     elapsed = time.time() - t0

@@ -348,7 +348,8 @@ def plot_sensitivity(catchments: list, results_dir: str, out_name: str):
 
     top = 1.0
     if pl.SHOW_SUPTITLE:
-        fig.suptitle("Climate Input Sensitivity — per-fold skill change",
+        fig.suptitle(f"{pl.design_label()} Climate Input Sensitivity — "
+                     f"per-year skill change",
                      fontsize=pl.FONT_SUPTITLE, fontweight="bold")
         top = 1.0 - 0.35 / fig_h
     plt.tight_layout(rect=[0, LEGEND_HEIGHT / fig_h, 1, top],

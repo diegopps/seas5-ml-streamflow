@@ -23,7 +23,11 @@ could mean either "the model used the forcing" or "the model was thrown by
 values it had never seen". A donor year is in-distribution by construction, so
 a drop can only mean the model was using *this* year's weather. The donor is
 drawn from the design's donor pool (seas5ml.designs.donor_pool; loyo: every
-other hydro year).
+other hydro year; split: the other test years, operational forecasts like
+the test year's own), keeping only candidates that can supply at least
+sens.MIN_DONOR_SHARE of the test year's rows (partial years at the record's
+edges are left out; seas5ml.sensitivity, "Partial donor years"). A test
+year without a usable candidate is skipped with a warning.
 
 Models and hyperparameters
     rf, xgb, lstm   each fold uses ITS OWN tuned winner (stage 1, tuned
@@ -46,7 +50,7 @@ Retraining per scenario would mix the effect being measured with ordinary
 run-to-run training variation.
 
 Usage:
-    python pipeline/2_sensitivity/run.py <catchment> <model> [--design loyo]
+    python pipeline/2_sensitivity/run.py <catchment> <model> [--design loyo|split]
     python pipeline/2_sensitivity/run.py zeravshan xgb
 
 Input:
@@ -63,15 +67,23 @@ Output (seas5ml.paths):
         <catchment>_<model>_final.pt       (lstm)
 
 The final model
-    After the fold loop, one last model is fitted on EVERY hydro year using
-    the catchment-wide winner config (most tuned-fold wins, the 'best' of
-    03_configranking.pdf/.csv) and saved to data/trained_models/<design>/.
-    No year is held out: it is never scored, so there is nothing to hold out
-    for, and the votes of all folds can be pooled. The fold models answer
-    "how well does the tuned model generalise"; this one is the catchment's
-    deployable model fitted to the whole record, saved with its provenance
-    (catchment, config, seed, training years) and its climatology (fit on
-    every year), and reloadable via seas5ml.models.load_fitted.
+    One model per (catchment, model) is saved to data/trained_models/<design>/
+    with its provenance (catchment, config, seed, training years) and its
+    climatology, reloadable via seas5ml.models.load_fitted.
+
+    loyo   After the fold loop, one last model is fitted on EVERY hydro year
+           using the catchment-wide winner config (most tuned-fold wins, the
+           'best' of 03_configranking.pdf/.csv). No year is held out: it is
+           never scored, so there is nothing to hold out for, and the votes
+           of all folds can be pooled. The fold models answer "how well does
+           the tuned model generalise"; this one is the catchment's deployable
+           model fitted to the whole record (climatology fit on every year).
+    split  The fold model itself is saved: trained on the hindcast years with
+           the split's own tuned winner, it is exactly the model that was
+           scored on the operational years, i.e. a model trained on hindcasts
+           and deployable on operational forecasts. No extra fit and no vote.
+           An all-years fit would not depend on the design, so it is left to
+           loyo.
 
 Climatology
     Each fold model is trained against a climatology (and a0) fit on that
@@ -206,7 +218,8 @@ def fit_final_model(model, config, *, df, fit_clim, years):
                       tr_yrs=tr_yrs, val_yrs=val_yrs)
 
 
-def save_final_model(fitted, *, design, catchment, model, config, years):
+def save_final_model(fitted, *, design, catchment, model, config, years,
+                     stage='2_sensitivity_final_fit', extra_meta=None):
     """Persist the final model under data/trained_models/<design>/."""
     out_dir = paths.trained_dir(design)
     os.makedirs(out_dir, exist_ok=True)
@@ -221,10 +234,45 @@ def save_final_model(fitted, *, design, catchment, model, config, years):
         'seed': SEED,
         'trained_on_years': [int(y) for y in years],
         'n_years': len(years),
-        'stage': '2_sensitivity_final_fit',
+        'stage': stage,
+        **(extra_meta or {}),
     }
     models.save_fitted(fitted, path, meta=meta)
     return path
+
+
+def fit_and_save_final(design, catchment, model, folds, *, df, fit_clim,
+                       years):
+    """loyo's final model: the catchment-wide winner (`final_config`) fitted
+    on every year (`fit_final_model`) and saved."""
+    config = final_config(design, catchment, model, folds)
+    if config is None:
+        print("  WARNING: no tuned winners to vote on -- no final model.")
+        return
+    print(f"  config={config['label']}"
+          + (" (catchment-wide winner: most tuned-fold wins)"
+             if model in TUNED_MODELS else ""))
+    t0 = time.time()
+    fitted = fit_final_model(model, config, df=df, fit_clim=fit_clim,
+                             years=years)
+    if fitted is None:
+        print("  WARNING: final fit produced no model -- nothing saved.")
+        return
+    path = save_final_model(fitted, design=design, catchment=catchment,
+                            model=model, config=config, years=years)
+    print(f"  Saved {path}  ({time.time() - t0:.0f}s)")
+
+
+def save_fold_model(fold, config, fitted, *, design, catchment, model):
+    """Save a fold's model as the design's final model (split: the model
+    trained on the hindcast years and scored on the operational ones)."""
+    return save_final_model(
+        fitted, design=design, catchment=catchment, model=model,
+        config=config, years=fold.train_years, stage='2_sensitivity_fold_model',
+        extra_meta={'fold': fold.id,
+                    'test_years': [int(y) for y in fold.test_years],
+                    'tr_yrs': sorted(int(y) for y in fold.tr_yrs),
+                    'val_yrs': sorted(int(y) for y in fold.val_yrs)})
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -269,6 +317,8 @@ def main():
     print(f"  {'-' * 91}")
 
     rows = []
+    skipped = []        # test years without a usable donor
+    fold_model = None   # split: (fold, config, fitted), saved as the final model
     for fold, config in plan:
         fold_t0 = time.time()
 
@@ -286,19 +336,31 @@ def main():
             # and independent of the model.
             fold_seed = int(np.random.SeedSequence(
                 [SEED, test_year]).generate_state(1)[0])
-            frames, donor_year, n_rows, n_dropped = sens.build_scenarios(
+            frames, donor_year, n_rows, n_dropped, donors = sens.build_scenarios(
                 df_test, df,
                 designs.donor_pool(design, fold, test_year, years),
                 test_year, fold_seed=fold_seed)
+            if donors['excluded']:
+                print(f"  {fold.id:>9s}  {test_year:6d}  note: "
+                      f"{donors['n_excluded']} of {donors['n_candidates']} "
+                      f"donor candidates supply < {sens.MIN_DONOR_SHARE:.0%} "
+                      f"of the year's rows, excluded: "
+                      + ", ".join(f"{y} ({s:.0%})" for y, s
+                                  in sorted(donors['excluded'].items())))
             if frames is None:
-                print(f"  {fold.id:>9s}  {test_year:6d}  no donor year "
-                      f"available -- skipping")
+                print(f"  {fold.id:>9s}  {test_year:6d}  WARNING: no usable "
+                      f"donor year ({donors['n_candidates']} candidates, none "
+                      f"supplies >= {sens.MIN_DONOR_SHARE:.0%} of the year's "
+                      f"rows) -- test year SKIPPED, absent from the "
+                      f"sensitivity results")
+                skipped.append(test_year)
                 continue
             if n_dropped:
                 print(f"  {fold.id:>9s}  {test_year:6d}  note: {n_dropped:,} "
                       f"rows dropped from all scenarios (donor {donor_year} "
                       f"lacks a match); {n_rows:,} retained")
-            scenarios[test_year] = (frames, donor_year, n_rows, n_dropped)
+            scenarios[test_year] = (frames, donor_year, n_rows, n_dropped,
+                                    donors)
         if not scenarios:
             continue
 
@@ -307,8 +369,11 @@ def main():
         if fitted is None:
             print(f"  {fold.id:>9s}  training produced no model -- skipping")
             continue
+        if design == 'split':
+            fold_model = (fold, config, fitted)
 
-        for test_year, (frames, donor_year, n_rows, n_dropped) in scenarios.items():
+        for test_year, (frames, donor_year, n_rows, n_dropped,
+                        donors) in scenarios.items():
             for scenario in sens.SCENARIOS:
                 # Scored against the model's own (fold) climatology.
                 pred = models.predict(fitted, frames[scenario],
@@ -327,6 +392,9 @@ def main():
                     'donor_year': donor_year if scenario == 'mixed' else np.nan,
                     'n_rows': n_rows,
                     'n_rows_dropped': n_dropped,
+                    'donor_share': round(donors['donor_share'], 4),
+                    'n_donor_candidates': donors['n_candidates'],
+                    'n_donors_excluded': donors['n_excluded'],
                     'best_epoch': fitted['info'].get('best_epoch', np.nan),
                     'time_s': round(time.time() - fold_t0, 1),
                 })
@@ -337,6 +405,9 @@ def main():
                       f"{donor_str:>6s}  {time.time() - fold_t0:5.0f}s",
                       flush=True)
 
+    if skipped:
+        print(f"\n  WARNING: {len(skipped)} test year(s) skipped, no usable "
+              f"donor: {sorted(skipped)}")
     if not rows:
         print("\nERROR: no folds produced results.")
         sys.exit(1)
@@ -359,25 +430,25 @@ def main():
     pd.DataFrame(summary).to_csv(out_dir / 'sensitivity_summary.csv',
                                  index=False)
 
-    # ── 4. Final model: one fit on every year, saved not scored ──────
-    print(f"\n[4/4] Training final model on all {len(years)} years...")
-    config = final_config(design, catchment, model, folds)
-    if config is None:
-        print("  WARNING: no tuned winners to vote on -- no final model.")
-    else:
-        print(f"  config={config['label']}"
-              + (" (catchment-wide winner: most tuned-fold wins)"
-                 if model in TUNED_MODELS else ""))
-        final_t0 = time.time()
-        fitted = fit_final_model(model, config, df=df, fit_clim=fit_clim,
-                                 years=years)
-        if fitted is None:
-            print("  WARNING: final fit produced no model -- nothing saved.")
+    # ── 4. Final model ────────────────────────────────────────────────
+    # split: the fold model itself (trained on the hindcast years, scored
+    # on the operational ones). loyo: one fit on every year, saved not
+    # scored.
+    if design == 'split':
+        print("\n[4/4] Saving the fold model as the final model...")
+        if fold_model is None:
+            print("  WARNING: the fold produced no model -- nothing saved.")
         else:
-            path = save_final_model(fitted, design=design,
-                                    catchment=catchment, model=model,
-                                    config=config, years=years)
-            print(f"  Saved {path}  ({time.time() - final_t0:.0f}s)")
+            fold, config, fitted = fold_model
+            path = save_fold_model(fold, config, fitted, design=design,
+                                   catchment=catchment, model=model)
+            print(f"  Saved {path}  (config={config['label']}, trained on "
+                  f"{len(fold.train_years)} years "
+                  f"{fold.train_years[0]}-{fold.train_years[-1]})")
+    else:
+        print(f"\n[4/4] Training final model on all {len(years)} years...")
+        fit_and_save_final(design, catchment, model, folds, df=df,
+                           fit_clim=fit_clim, years=years)
 
     print(f"\n  Scenario means ({model.upper()}):")
     pivot = mdf.pivot_table(index='scenario',

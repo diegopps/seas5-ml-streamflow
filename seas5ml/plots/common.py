@@ -26,11 +26,24 @@ PLOT_DIR = str(paths.figures_dir(DESIGN))
 HPTUNE_MODELS = ["lstm", "rf", "xgb"]
 
 
+# Design name as it appears in figure titles (loyo keeps the label the
+# paper's figures already carry).
+DESIGN_LABELS = {
+    "loyo":  "LOGO-CV",
+    "split": "Hindcast → operational",
+}
+
+
 def use_design(design: str):
     """Read results from, and write figures to, `design`'s folders."""
     global DESIGN, PLOT_DIR
     DESIGN = check_design(design)
     PLOT_DIR = str(paths.figures_dir(design))
+
+
+def design_label() -> str:
+    """Title label of the selected design (DESIGN_LABELS)."""
+    return DESIGN_LABELS[DESIGN]
 
 # ═══════════════════════════════════════════════════════════════════════
 # CATCHMENTS

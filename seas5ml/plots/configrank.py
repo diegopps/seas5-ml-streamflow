@@ -5,7 +5,9 @@ Produces one figure from the tuned runs of stage 1:
 
   03_configranking.pdf (+ .csv) — for each tuned model, a table of
       every candidate config's mean rank across the outer folds, one row per
-      catchment.
+      catchment. Under the split design (one outer fold) the ranks are
+      taken across the inner folds of the single search instead (see
+      RANK_UNIT); everything below reads the same with "inner" for "outer".
 
 Reading the figure:
   - A cell is a config's MEAN RANK across that catchment's outer folds, where
@@ -60,6 +62,20 @@ from . import common as pl
 # the mean of 1..n. Set per model from the config count actually found.
 CMAP = "RdBu_r"          # low rank (good) = blue, matching the default run's ACC heatmap
 
+# What the configs are ranked across, per design.
+#   outer  loyo: within each outer fold by its mean inner-CV ACC; mean rank
+#          across the outer folds; `best` = the config winning the most outer
+#          folds, `wins` = how many.
+#   inner  split: one outer fold, so "across outer folds" would be a single
+#          ranking. Ranked within each inner fold of that search by that inner
+#          fold's ACC instead; mean rank across the inner folds; `best` = the
+#          split's winner (winner.csv, best mean inner-CV ACC), `wins` = in
+#          how many inner folds it ranked first.
+# Both ask the same question -- is any config consistently better? -- at the
+# level each design has several folds.
+RANK_UNIT = {"loyo": "outer", "split": "inner"}
+UNIT_LABEL = {"outer": "outer folds", "inner": "inner folds"}
+
 # Built at print size (pl.FIG_WIDTH_IN wide); the heatmap takes whatever
 # width the row labels and summary block leave, and only the height scales
 # with the number of catchment rows and models.
@@ -78,34 +94,45 @@ def config_stats(catchment: str, model: str):
     """
     Per-config ranking statistics for one (catchment, model) search.
 
-    Within each outer fold the configs are ranked by their mean inner-CV ACC
-    (1 = best). Returns None if this search has no completed folds.
+    The configs are ranked (1 = best) within each ranking unit of the
+    design (RANK_UNIT): each outer fold by its mean inner-CV ACC (loyo), or
+    each inner fold of the one outer fold by its ACC (split). Returns None
+    if this search has no completed folds.
     """
     inner = pl.load_inner_cv(catchment, model)
     if inner is None:
         return None
+    unit = RANK_UNIT[pl.DESIGN]
 
-    # One mean inner-CV ACC per (outer fold, config).
-    per_fold = (inner.groupby(['fold', 'config'])['acc']
-                     .mean().unstack('config'))
-    labels = sorted(per_fold.columns)
-    per_fold = per_fold.reindex(columns=labels)
+    # One ACC per (ranking unit, config).
+    keys = ['fold'] if unit == 'outer' else ['fold', 'inner_fold']
+    per_unit = inner.groupby(keys + ['config'])['acc'].mean().unstack('config')
+    labels = sorted(per_unit.columns)
+    per_unit = per_unit.reindex(columns=labels)
 
-    # Rank within each outer fold; NaN scores stay NaN rather than ranking last.
-    ranks = per_fold.rank(axis=1, ascending=False, na_option='keep')
+    # Rank within each unit; NaN scores stay NaN rather than ranking last.
+    ranks = per_unit.rank(axis=1, ascending=False, na_option='keep')
 
     winners = pl.load_winners(catchment, model)
-    if winners is not None and 'winner_config' in winners.columns:
-        wins = winners['winner_config'].value_counts()
+    have_winners = winners is not None and 'winner_config' in winners.columns
+    if unit == 'outer':
+        wins = (winners['winner_config'].value_counts() if have_winners
+                else pd.Series(dtype=float))
+        wins = wins.reindex(labels).fillna(0).astype(int)
+        best = wins.idxmax() if wins.sum() > 0 else None
+        best_wins = int(wins.max()) if best is not None else 0
     else:
-        wins = pd.Series(dtype=float)
+        best = str(winners['winner_config'].iloc[0]) if have_winners else None
+        firsts = per_unit.dropna(how='all').idxmax(axis=1).value_counts()
+        best_wins = int(firsts.get(best, 0)) if best is not None else 0
 
     return {
         'labels': labels,
         'ranks': ranks,
-        'mean_acc': per_fold.mean(),
-        'wins': wins.reindex(labels).fillna(0).astype(int),
-        'n_folds': int(len(per_fold)),
+        'mean_acc': per_unit.mean(),
+        'best': best,
+        'best_wins': best_wins,
+        'n_folds': int(len(per_unit)),
     }
 
 
@@ -132,10 +159,9 @@ def build_model_table(model: str, catchments: list):
 
         rank_rows[catchment] = st['ranks'].mean()
 
-        wins = st['wins']
         summary_rows[catchment] = {
-            'best': wins.idxmax() if wins.sum() > 0 else "—",
-            'wins': int(wins.max()) if wins.sum() > 0 else 0,
+            'best': st['best'] if st['best'] is not None else "—",
+            'wins': st['best_wins'],
             'n_folds': st['n_folds'],
             'acc_range': float(st['mean_acc'].max() - st['mean_acc'].min()),
         }
@@ -265,7 +291,7 @@ def plot_config_ranks(catchments: list):
     # Direction is written into the label itself; separate end-labels would
     # collide with the tick numbers.
     cbar.set_label(
-        f"← better        Mean rank across outer folds "
+        f"← better        Mean rank across {UNIT_LABEL[RANK_UNIT[pl.DESIGN]]} "
         f"        worse →",
         fontsize=pl.FONT_AXIS_LABEL)
     # Integer ranks, with the chance rank marked.

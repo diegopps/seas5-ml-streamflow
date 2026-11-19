@@ -45,7 +45,7 @@ Climatology
 -----------
 Every fitted model carries the climatology it was trained against
 (`fitted['doy_clim']`), fit on exactly its training years (the fold's
-non-test years; every year for the final model). Prediction reuses it for
+training years; every year for loyo's final model). Prediction reuses it for
 a0, the back-transform and Q_clim, so a model is never scored against a
 climatology that includes its test year, and a saved model needs nothing
 else to predict.
@@ -64,7 +64,8 @@ Which hyperparameters
 rf, xgb, and lstm use, in each fold, that fold's own tuned winner (the
 config chosen by the inner CV of stage 1's tuned run for the same fold), so
 the test year played no part in choosing it. The catchment-wide winner (most
-fold wins) is used only for the final all-years model, which is never scored.
+fold wins) is used only for loyo's final all-years model, which is never
+scored. Under the split there is one fold, and its model is the final one.
 Ridge has no search (RidgeCV selects its own regularisation by internal
 generalised cross-validation) and uses its default configuration.
 
@@ -75,6 +76,17 @@ scored over identical rows. A donor year can be missing an (init month, lead
 day, member) combination that the target year has — rare, but real at the
 record's edges. Rows that fail to find a donor match are dropped from both
 scenarios, not just from `mixed`, so every comparison stays paired.
+
+Partial donor years
+-------------------
+A year at the record's edge can hold only part of its rows (e.g. Oct-Dec
+when discharge ends in December, or no late summer when the last SEAS5 init
+is in December). Drawn as a donor, it would leave most of the test year
+unscored by the rule above. A candidate therefore stays in the donor pool
+only if it can supply at least MIN_DONOR_SHARE of the test year's rows
+(`usable_donors`), measured with the same matching as the swap itself. The
+rule is the same under every design. A test year with no usable candidate
+is skipped (the caller warns).
 """
 
 import numpy as np
@@ -92,6 +104,10 @@ SCENARIOS = ('normal', 'mixed')
 # Fixed salt keeping the donor draw reproducible from the fold seed alone.
 DONOR_SALT = 811
 
+# A candidate donor year must be able to supply at least this share of the
+# test year's rows (see `usable_donors`); others leave the pool.
+MIN_DONOR_SHARE = 0.9
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # INPUT CORRUPTION
@@ -105,6 +121,50 @@ def pick_donor_year(candidates, *, fold_seed):
         return None
     rng = np.random.default_rng(np.random.SeedSequence([fold_seed, DONOR_SALT]))
     return int(rng.choice(candidates))
+
+
+def _member_slots(df_test, donor):
+    """Map each of the target's members onto a donor member by position,
+    wrapping if the donor has fewer (see `corrupt_mixed`)."""
+    test_members = np.sort(df_test['member'].unique())
+    donor_members = np.sort(donor['member'].unique())
+    return {int(m): int(donor_members[i % len(donor_members)])
+            for i, m in enumerate(test_members)}
+
+
+def donor_share(df_test, df_full, donor_year, test_year):
+    """
+    Share of `test_year`'s rows in `df_test` that `donor_year` can supply:
+    rows whose (init month, lead day, member slot) exists in the donor year,
+    matched exactly as `corrupt_mixed` matches them. The rest would be
+    dropped from both scenarios. 0.0 if the donor has no rows.
+    """
+    donor = df_full[df_full[GROUP_COL] == donor_year]
+    target = df_test[df_test[GROUP_COL] == test_year]
+    if len(donor) == 0 or len(target) == 0:
+        return 0.0
+    slot = _member_slots(df_test, donor)
+    have = pd.MultiIndex.from_arrays([donor['init_date'].dt.month,
+                                      donor['lead_day'], donor['member']])
+    need = pd.MultiIndex.from_arrays([target['init_date'].dt.month,
+                                      target['lead_day'],
+                                      target['member'].map(slot)])
+    return float(need.isin(have).mean())
+
+
+def usable_donors(df_test, df_full, candidates, test_year, *,
+                  min_share=MIN_DONOR_SHARE):
+    """
+    The candidates (seas5ml.designs.donor_pool) that can supply at least
+    `min_share` of the test year's rows (`donor_share`), in their original
+    order, plus every candidate's share as {year: share}. Keeps partial
+    years (record edges: Oct-Dec only, or missing the late summer) out of
+    the draw, where they would leave most of the test year unscored. Same
+    rule under every design.
+    """
+    shares = {int(y): donor_share(df_test, df_full, int(y), test_year)
+              for y in candidates}
+    return [int(y) for y in candidates if shares[int(y)] >= min_share], shares
 
 
 def corrupt_mixed(df_test, df_full, donor_year):
@@ -130,10 +190,7 @@ def corrupt_mixed(df_test, df_full, donor_year):
     if len(donor) == 0:
         return None
 
-    test_members = np.sort(df_test['member'].unique())
-    donor_members = np.sort(donor['member'].unique())
-    slot = {int(m): int(donor_members[i % len(donor_members)])
-            for i, m in enumerate(test_members)}
+    slot = _member_slots(df_test, donor)
 
     donor = donor.copy()
     donor['_im'] = donor['init_date'].dt.month
@@ -161,8 +218,9 @@ def build_scenarios(df_test, df_full, donor_candidates, test_year, *,
                     fold_seed):
     """
     Build the two scenario frames for one test year, restricted to the rows
-    both scenarios can supply. The donor year is drawn from
-    `donor_candidates` (seas5ml.designs.donor_pool).
+    both scenarios can supply. The donor year is drawn from those
+    `donor_candidates` (seas5ml.designs.donor_pool) that can supply at least
+    MIN_DONOR_SHARE of the test year's rows (`usable_donors`).
 
     `df_test` holds every trajectory that reaches `test_year`, whole, so the
     LSTM can read each from initialisation (see lstm.build_trajectories);
@@ -173,17 +231,26 @@ def build_scenarios(df_test, df_full, donor_candidates, test_year, *,
     context row without a donor match keeps NaN forcing, which the LSTM's
     standardisation maps to the training mean.
 
-    Returns (frames, donor_year, n_rows, n_dropped) where `frames` maps
-    scenario name to its frame and the counts refer to test-year rows, or
-    (None, ...) if no donor year is available.
+    Returns (frames, donor_year, n_rows, n_dropped, donors) where `frames`
+    maps scenario name to its frame and the counts refer to test-year rows,
+    or (None, ...) if no candidate is usable. `donors` describes the pool:
+    n_candidates, n_excluded, excluded ({year: share} of the candidates
+    below MIN_DONOR_SHARE) and donor_share (the drawn donor's share).
     """
-    donor_year = pick_donor_year(donor_candidates, fold_seed=fold_seed)
+    usable, shares = usable_donors(df_test, df_full, donor_candidates,
+                                   test_year)
+    donors = {'n_candidates': len(shares),
+              'n_excluded': len(shares) - len(usable),
+              'excluded': {y: s for y, s in shares.items() if y not in usable},
+              'donor_share': np.nan}
+    donor_year = pick_donor_year(usable, fold_seed=fold_seed)
     if donor_year is None:
-        return None, None, 0, 0
+        return None, None, 0, 0, donors
+    donors['donor_share'] = shares[donor_year]
 
     df_mixed_full = corrupt_mixed(df_test, df_full, donor_year)
     if df_mixed_full is None:
-        return None, donor_year, 0, 0
+        return None, donor_year, 0, 0, donors
 
     in_test = (df_mixed_full[GROUP_COL] == test_year).values
     matched = paired_row_mask(df_mixed_full)
@@ -194,5 +261,5 @@ def build_scenarios(df_test, df_full, donor_candidates, test_year, *,
     df_mixed = df_mixed_full.loc[keep].reset_index(drop=True)
 
     frames = {'normal': df_base, 'mixed': df_mixed}
-    return frames, donor_year, int((in_test & matched).sum()), n_dropped
+    return frames, donor_year, int((in_test & matched).sum()), n_dropped, donors
 

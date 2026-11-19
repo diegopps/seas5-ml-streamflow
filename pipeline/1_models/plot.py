@@ -54,12 +54,14 @@ def plot_default(catchments, by_regime):
 
     print("\n=== Boxplot comparison (short lead, 0-30 d) ===")
     boxplots.run(catchments, 0, 30,
-                 "LOGO-CV Aggregate Skill\n(Short) Lead time: 0-30 days",
+                 f"{pl.design_label()} Aggregate Skill\n"
+                 f"(Short) Lead time: 0-30 days",
                  "01a_boxplotcomparison_short")
 
     print("\n=== Boxplot comparison (long lead, 185-214 d) ===")
     boxplots.run(catchments, 185, 214,
-                 "LOGO-CV Aggregate Skill\n(Long) Lead time: 185-214 days",
+                 f"{pl.design_label()} Aggregate Skill\n"
+                 f"(Long) Lead time: 185-214 days",
                  "01b_boxplotcomparison_long")
 
     print("\n=== Lead-time x init-month heatmap grid ===")
@@ -85,13 +87,13 @@ def plot_tuned(catchments):
 
     print("\n=== Tuning vs. reference (short lead, 0-30 d) ===")
     tuningvsref.run(catchments, 0, 30,
-                    "Best parameter config vs. default\n"
+                    f"{pl.design_label()} Best parameter config vs. default\n"
                     "(Short) Lead time: 0-30 Days",
                     "04a_tuningvsreference_short")
 
     print("\n=== Tuning vs. reference (long lead, 185-214 d) ===")
     tuningvsref.run(catchments, 185, 214,
-                    "Best parameter config vs. default\n"
+                    f"{pl.design_label()} Best parameter config vs. default\n"
                     "(Long) Lead time: 185-214 Days",
                     "04b_tuningvsreference_long")
 

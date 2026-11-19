@@ -53,6 +53,9 @@ DEFAULT_DESIGN = "loyo"
 SPLIT_TRAIN_LAST = 2016
 SPLIT_TEST_FIRST = 2018
 SPLIT_FOLD_ID = "hindcast"
+# `source` labels written by stage 0 (pipeline/0_data/preprocess.py).
+SPLIT_TRAIN_SOURCE = "hindcast"
+SPLIT_TEST_SOURCE = "forecast"
 
 
 @dataclass(frozen=True)
@@ -132,6 +135,42 @@ def get_fold(design: str, years, fold_id) -> Fold:
             return fold
     raise ValueError(f"design '{design}' has no fold '{fold_id}' for hydro "
                      f"years {list(years)}")
+
+
+def check_sources(design: str, design_folds, df) -> None:
+    """
+    Check a design's folds against the SEAS5 source of the analysis frame
+    `df` (columns hydro_year, source). Under split, every row verifying in a
+    training year must come from a hindcast and every row verifying in a test
+    year from an operational forecast; raises ValueError listing the
+    offending (hydro year, source) row counts otherwise. Checking by
+    verifying year covers both sides: a training run uses only rows
+    verifying in its training years, and a test year is scored on the rows
+    verifying in it. Nothing to check under loyo. Called by stage 0 before
+    it writes the fold manifests.
+    """
+    if check_design(design) != "split":
+        return
+    problems = []
+    for fold in design_folds:
+        for role, years, want in (("training", fold.train_years,
+                                   SPLIT_TRAIN_SOURCE),
+                                  ("test", fold.test_years,
+                                   SPLIT_TEST_SOURCE)):
+            sub = df[df["hydro_year"].isin(years)]
+            bad = sub[sub["source"] != want]
+            if len(bad):
+                counts = bad.groupby(["hydro_year", "source"]).size()
+                problems.append(
+                    f"fold '{fold.id}': {len(bad):,} rows verifying in {role} "
+                    f"years are not '{want}': "
+                    + ", ".join(f"HY{hy} {src} x{n:,}"
+                                for (hy, src), n in counts.items()))
+    if problems:
+        raise ValueError(
+            f"design 'split' (train HY <= {SPLIT_TRAIN_LAST}, test HY >= "
+            f"{SPLIT_TEST_FIRST}) does not match the data's SEAS5 sources:\n  "
+            + "\n  ".join(problems))
 
 
 def donor_pool(design: str, fold: Fold, test_year: int, years) -> list:
