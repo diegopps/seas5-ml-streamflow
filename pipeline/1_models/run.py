@@ -32,8 +32,9 @@ Usage:
     python pipeline/1_models/run.py <catchment> <model> tuned --fold <id>
     (add --design <design> for another evaluation design; default loyo)
 
-    <model>  default: climatology | persistence (also writes
-                      damped_persistence) | ridge | rf | xgb | lstm
+    <model>  default: climatology (also writes doy_reference) |
+                      persistence (also writes damped_persistence) |
+                      ridge | rf | xgb | lstm
              tuned:   rf | xgb | lstm
     <id>     a fold id of the design (loyo: the test hydro year), as listed
              in data/processed_data/<catchment>_folds_<design>.txt
@@ -77,6 +78,11 @@ from seas5ml.models import lstm as lstm_mod
 
 DEFAULT_MODELS = ('climatology', 'persistence') + configs.LEARNED_MODELS
 VARIANTS = ('default', 'tuned')
+
+# A default job for one of these models also writes its companions (cheap
+# baselines sharing one job).
+JOB_MODELS = {'climatology': ('climatology', 'doy_reference'),
+              'persistence': ('persistence', 'damped_persistence')}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -201,10 +207,7 @@ def run_default_model(name, *, catchment, design, df, years, fit_clim):
 
 
 def run_default(model, **kw):
-    # The persistence job writes both persistence models.
-    names = (['persistence', 'damped_persistence'] if model == 'persistence'
-             else [model])
-    for name in names:
+    for name in JOB_MODELS.get(model, (model,)):
         run_default_model(name, **kw)
 
 

@@ -16,6 +16,15 @@ stage-1 driver loops over the folds and scores each test year.
                       with phi the lag-1 autocorrelation of the observed anomaly
                       record, estimated per fold on the fold's training hydro
                       years, against the fold's climatology (`fold_phi`).
+  doy_reference       the UNSMOOTHED mean of log1p(Q) per day of year over the
+                      fold's training hydro years (`doy_mean`), scored against
+                      the (smoothed) fold climatology like every forecast. It
+                      knows nothing but the date, yet resolves features of the
+                      seasonal cycle shorter than the climatology's 31-day
+                      window (a sharp freshet), so it earns some ACC without
+                      any information about the year: skill above it is skill
+                      beyond the seasonal cycle. The analytic limit of a model
+                      trained on day-of-year features alone.
 """
 
 import numpy as np
@@ -25,7 +34,8 @@ from ..climatology import eligible_hydro_years
 from ..data import GROUP_COL, hydro_year_of
 from ..features import apply_fold_climatology
 
-BASELINES = ('climatology', 'persistence', 'damped_persistence')
+BASELINES = ('climatology', 'persistence', 'damped_persistence',
+             'doy_reference')
 
 # Columns of a baseline's prediction frame (one row per init_date, date).
 DET_COLS = ['init_date', 'date', 'lead_day', 'hydro_year',
@@ -103,6 +113,24 @@ def fold_phi(fit_clim, train_years) -> float:
     return estimate_phi(anom)
 
 
+def doy_mean(fit_clim, train_years) -> dict:
+    """
+    Unsmoothed day-of-year mean of log1p(Q), {doy (1-366): value}, over the
+    eligible hydro years among `train_years` (the years the fold climatology
+    is fit on: seas5ml.climatology.compute_climatology's rule). Days of year
+    without an observation take the nearest earlier one (later one at the
+    start of the year).
+    """
+    years = (eligible_hydro_years(fit_clim.obs_daily_q, fit_clim.skip_years,
+                                  start_year=fit_clim.start_year)
+             & {int(y) for y in train_years})
+    obs = fit_clim.obs_daily_q
+    sel = obs[np.isin(hydro_year_of(obs.index), list(years))]
+    raw = (np.log1p(sel).groupby(sel.index.dayofyear).mean()
+             .reindex(range(1, 367)).ffill().bfill())
+    return raw.to_dict()
+
+
 def predict_baseline(model, df, fit_clim, fold):
     """
     One baseline's forecast of a fold's test years, against the fold's
@@ -113,6 +141,8 @@ def predict_baseline(model, df, fit_clim, fold):
       persistence         a0 carried forward flat (phi = 1)
       damped_persistence  phi**lead_day * a0, phi estimated on the fold's
                           training years (`fold_phi`)
+      doy_reference       the unsmoothed day-of-year mean of the fold's
+                          training years (`doy_mean`)
 
     Returns (pred, info): `pred` has one row per (init_date, date) with
     DET_COLS (valid rows only), or is None if the fold has no test rows;
@@ -126,10 +156,15 @@ def predict_baseline(model, df, fit_clim, fold):
         return None, {}
 
     info = {}
-    if model == 'climatology':
+    if model in ('climatology', 'doy_reference'):
         doy_clim = fit_clim(fold.train_years)
-        q_clim_log = df_test['date'].dt.dayofyear.map(doy_clim).values
-        q_pred = np.expm1(q_clim_log)                 # zero anomaly -> clim
+        doy = df_test['date'].dt.dayofyear
+        q_clim_log = doy.map(doy_clim).values
+        if model == 'climatology':
+            q_pred = np.expm1(q_clim_log)             # zero anomaly -> clim
+        else:
+            q_pred = np.expm1(doy.map(doy_mean(fit_clim,
+                                               fold.train_years)).values)
     else:
         # Only the test rows are used, so a0 is written on that slice alone.
         doy_clim = apply_fold_climatology(df_test, fit_clim, fold.train_years)

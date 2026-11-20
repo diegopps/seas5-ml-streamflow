@@ -3,8 +3,9 @@
 # submit.sh — stage 1 (train and evaluate the models)
 #
 #   default  one job per (catchment, model), covering every fold with the
-#            default configuration. Models: climatology, persistence (also
-#            writes damped_persistence), ridge, rf, xgb, lstm.
+#            default configuration. Models: climatology (also writes
+#            doy_reference), persistence (also writes damped_persistence),
+#            ridge, rf, xgb, lstm.
 #   tuned    one job per (catchment, model, fold): nested-CV search, winner
 #            retrain and score for that fold (measured: lstm ~15-16 h on 16
 #            CPUs for kirchbichl, the slowest catchment; rf ~2.5 h; xgb
