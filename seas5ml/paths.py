@@ -16,9 +16,9 @@ Every output path is built here and nowhere else:
         tuned/<catchment>/<model>/fold_<id>/  stage 1, nested-CV tuning (one fold)
         sensitivity/<catchment>/<model>/    stage 2
         <kind>/_pooled/<model>/             pooled models: checkpoints, pool-level records
-        scores/<variant>/<catchment>/<model>/  stage 1 scores at daily, weekly and
+        scores/<variant>/<catchment>/<model>/  scores at daily, weekly and
                                             monthly resolution (score.py; variant
-                                            default or tuned)
+                                            default, tuned or sensitivity)
         figures/                            plot-script outputs
     data/results/paper_figures/{main,appendix}/   stage 3
     data/trained_models/<design>/           stage 2 final all-years models
@@ -92,7 +92,7 @@ def pooled_work_dir(design: str, kind: str, model: str) -> Path:
     return kind_dir(design, kind) / "_pooled" / model
 
 
-SCORE_VARIANTS = ("default", "tuned")
+SCORE_VARIANTS = ("default", "tuned", "sensitivity")
 
 
 def scores_dir(design: str, variant: str, catchment: str, model: str) -> Path:
@@ -100,8 +100,8 @@ def scores_dir(design: str, variant: str, catchment: str, model: str) -> Path:
     Scores of one model at every resolution (pipeline/1_models/score.py):
     data/results/<design>/scores/<variant>/<catchment>/<model>/. `variant`
     names the line-up scored (default: every default run; tuned: the tuned
-    models plus ridge and the baselines), not where each model's
-    predictions came from.
+    models plus ridge and the baselines; sensitivity: the stage-2 scenarios
+    of the learned models), not where each model's predictions came from.
     """
     if variant not in SCORE_VARIANTS:
         raise ValueError(f"unknown score variant '{variant}' "

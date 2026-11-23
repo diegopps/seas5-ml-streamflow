@@ -62,6 +62,11 @@ Output (seas5ml.paths):
     data/results/<design>/sensitivity/<catchment>/<model>/
         sensitivity_fold_metrics.csv   one row per test year x scenario
         sensitivity_summary.csv        per-scenario aggregate
+        predictions_members_<scenario>.parquet
+                                       per-member predictions of every scored
+                                       test year, one file per scenario
+                                       (paired rows; scored per lead month by
+                                       pipeline/1_models/score.py sensitivity)
     data/trained_models/<design>/
         <catchment>_<model>_final.joblib   (ridge / rf / xgb)
         <catchment>_<model>_final.pt       (lstm)
@@ -314,6 +319,7 @@ def main():
     print(f"  {'-' * 91}")
 
     rows = []
+    members = {s: [] for s in sens.SCENARIOS}   # per-member frames per scenario
     skipped = []        # test years without a usable donor
     fold_model = None   # split: (fold, config, fitted), saved as the final model
     for fold, config in plan:
@@ -335,8 +341,12 @@ def main():
         if design == 'split':
             fold_model = (fold, config, fitted)
 
-        rows += sens.scenario_rows(fitted, scenarios, fold=fold, model=model,
-                                   config=config, t0=fold_t0, tag=fold.id)
+        fold_rows, fold_members = sens.scenario_rows(
+            fitted, scenarios, fold=fold, model=model, config=config,
+            t0=fold_t0, tag=fold.id)
+        rows += fold_rows
+        for s, preds in fold_members.items():
+            members[s] += preds
 
     if skipped:
         print(f"\n  WARNING: {len(skipped)} test year(s) skipped, no usable "
@@ -345,9 +355,14 @@ def main():
         print("\nERROR: no folds produced results.")
         sys.exit(1)
 
-    # Fold metrics, plus the per-scenario summary the figure is built from.
+    # Fold metrics, the per-scenario summary, and each scenario's member
+    # predictions (scored per lead month by pipeline/1_models/score.py
+    # sensitivity). Each test year belongs to one fold, so the folds'
+    # frames do not overlap.
     mdf = pd.DataFrame(rows)
-    sens.write_results(out_dir, mdf, catchment=catchment, model=model)
+    sens.write_results(out_dir, mdf, catchment=catchment, model=model,
+                       members={s: pd.concat(p, ignore_index=True)
+                                for s, p in members.items()})
 
     # ── 4. Final model ────────────────────────────────────────────────
     # split: the fold model itself (trained on the hindcast years, scored

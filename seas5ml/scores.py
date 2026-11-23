@@ -18,6 +18,10 @@ Two score tables per resolution:
            monthly resolution a cell holds one value per year, so its ACC is
            pure year-to-year skill.
 
+Stage 2 (sensitivity test) scores each scenario's predictions with the same
+tables; `scenario_deltas` turns two yearly tables into the paired per-year
+differences per lead month (m3).
+
 Rules
     - NSE, KGE in Q space; ACC on log1p anomalies against Q_clim
       (seas5ml.metrics.calc_acc), i.e. the aggregated flow against the fold
@@ -152,6 +156,47 @@ def cell_scores(ens, resolution, design) -> pd.DataFrame:
                                           sub['Q_clim'].values)
             rows.append(row)
     return pd.DataFrame(rows, columns=CELL_COLS)
+
+
+DELTA_KEYS = ['resolution', 'hydro_year', 'lead_month']
+# Sign of each metric's paired difference so that positive = the corrupted
+# forcing HURT skill (the sign of the stage-2 figure): normal - corrupted
+# for higher-is-better metrics, corrupted - normal for CRPS.
+DELTA_SIGN = {'nse': 1, 'kge': 1, 'acc': 1, 'crpss': 1, 'crps': -1}
+DELTA_COLS = (['scenario'] + DELTA_KEYS + ['n_starts', 'n']
+              + [f'd_{m}' for m in DELTA_SIGN])
+
+
+def scenario_deltas(normal: pd.DataFrame, corrupted: pd.DataFrame,
+                    scenario: str) -> pd.DataFrame:
+    """
+    Paired per-year differences between two `yearly_scores` tables of the
+    stage-2 scenarios (`normal`, and the `corrupted` one named `scenario`),
+    one row per (resolution, hydro year, lead month), d_<metric> signed by
+    DELTA_SIGN (positive = corruption hurt). Both tables come from frames
+    over the same paired rows (seas5ml.sensitivity), so they must hold the
+    same keys with the same n_starts and n; raises otherwise. CRPS_clim is
+    the same in both (same observations and Q_clim), so d_crpss =
+    d_crps / CRPS_clim.
+    """
+    a = normal.set_index(DELTA_KEYS).sort_index()
+    b = corrupted.set_index(DELTA_KEYS).sort_index()
+    if not a.index.equals(b.index):
+        only = a.index.symmetric_difference(b.index)
+        raise ValueError(f"scenarios normal and {scenario} scored different "
+                         f"(resolution, hydro year, lead month) rows: "
+                         f"{len(only)} unpaired, e.g. {list(only[:3])}")
+    for col in ('n_starts', 'n'):
+        bad = (a[col] != b[col])
+        if bad.any():
+            raise ValueError(f"scenarios normal and {scenario} differ in "
+                             f"{col} on {int(bad.sum())} rows, e.g. "
+                             f"{list(a.index[bad][:3])}")
+    out = a[['n_starts', 'n']].copy()
+    for m, sign in DELTA_SIGN.items():
+        out[f'd_{m}'] = sign * (a[m] - b[m])
+    out = out.reset_index().assign(scenario=scenario)
+    return out[DELTA_COLS]
 
 
 def score_model(pred: pd.DataFrame, *, design: str,

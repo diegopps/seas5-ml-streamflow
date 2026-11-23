@@ -7,11 +7,14 @@
 # that line-up are complete (tuned: a tuned model with missing folds stops
 # the job unless --partial). No training, CPU only.
 #
-#   default  every model's default run
-#   tuned    the tuned models' folds + ridge and the baselines' default runs
+#   default      every model's default run
+#   tuned        the tuned models' folds + ridge and the baselines' default runs
+#   sensitivity  stage 2's scenarios of the learned models (after stage 2):
+#                each scenario scored, plus the paired deltas per lead month
 #
 # Usage:
 #   bash pipeline/1_models/submit_score.sh <variant> [--design <d>] [--partial] [catchments...|all]
+#   (--partial: tuned only)
 #
 #   bash pipeline/1_models/submit_score.sh default all
 #   bash pipeline/1_models/submit_score.sh tuned --design split all
@@ -37,9 +40,9 @@ WALLTIME=04:00:00
 VARIANT="$1"
 shift
 case "$VARIANT" in
-    default|tuned) ;;
+    default|tuned|sensitivity) ;;
     *)
-        echo "Usage: bash $0 default|tuned [--design <d>] [--partial] [catchments...|all]"
+        echo "Usage: bash $0 default|tuned|sensitivity [--design <d>] [--partial] [catchments...|all]"
         exit 1 ;;
 esac
 

@@ -34,9 +34,11 @@ Input:
 
 Output (seas5ml.paths):
     data/results/<design>/sensitivity/<catchment>/pooled_lstm/
-        sensitivity_fold_metrics.csv, sensitivity_summary.csv
+        sensitivity_fold_metrics.csv, sensitivity_summary.csv,
+        predictions_members_<scenario>.parquet   (as for the single models)
     data/results/<design>/sensitivity/_pooled/pooled_lstm/
-        fold_<id>/ checkpoints, removed after assembly
+        fold_<id>/ checkpoints (rows and per-scenario members per
+        catchment), removed after assembly
     data/trained_models/<design>/pooled_lstm_final.pt
 """
 
@@ -57,6 +59,7 @@ import pandas as pd
 from seas5ml import designs, models, paths, pooled, tuning
 from seas5ml import sensitivity as sens
 from seas5ml.designs import SEED
+from seas5ml.io_results import write_members
 from seas5ml.models import configs
 from seas5ml.models import lstm as lstm_mod
 
@@ -258,12 +261,16 @@ def main():
                 if design == 'split':
                     fold_model = fitted
                 for c, s in scenarios.items():
-                    rows = sens.scenario_rows(
+                    rows, members = sens.scenario_rows(
                         fitted, s, fold=cfolds[c], model=model, config=config,
                         t0=fold_t0, tag=f"{c}/{fold.id}", catchment=c)
                     if rows:
                         pd.DataFrame(rows).to_csv(fdir / f"ckpt_rows_{c}.csv",
                                                   index=False)
+                        for scen, preds in members.items():
+                            write_members(
+                                fdir / f"ckpt_members_{c}_{scen}.parquet",
+                                pd.concat(preds, ignore_index=True))
         (fdir / DONE).write_text("done\n")
 
     if skipped:
@@ -274,16 +281,23 @@ def main():
     print("\nAssembling per-catchment results...")
     written = 0
     for c in pool:
-        parts = [pd.read_csv(p, dtype={'fold': str})
-                 for p in sorted(work.glob(f"fold_*/ckpt_rows_{c}.csv"))]
-        if not parts:
+        row_files = sorted(work.glob(f"fold_*/ckpt_rows_{c}.csv"))
+        if not row_files:
             print(f"  WARNING: {c}: no scored fold -- nothing written")
             continue
         # Fold order (the checkpoint folders sort as the fold ids), rows
         # within a fold as scored: the layout of the single models' file.
-        mdf = pd.concat(parts, ignore_index=True)
+        # A fold's member checkpoints are written with its rows.
+        mdf = pd.concat([pd.read_csv(p, dtype={'fold': str})
+                         for p in row_files], ignore_index=True)
+        members = {scen: pd.concat(
+                       [pd.read_parquet(p.parent / f"ckpt_members_{c}_{scen}"
+                                                   ".parquet")
+                        for p in row_files], ignore_index=True)
+                   for scen in sens.SCENARIOS}
         out_dir = paths.run_dir(design, 'sensitivity', c, model)
-        sens.write_results(out_dir, mdf, catchment=c, model=model)
+        sens.write_results(out_dir, mdf, catchment=c, model=model,
+                           members=members)
         print(f"\n  {c}: {mdf['hydro_year'].nunique()} test years -> "
               f"{out_dir}/")
         sens.print_summary(mdf, model)

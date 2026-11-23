@@ -77,6 +77,16 @@ day, member) combination that the target year has — rare, but real at the
 record's edges. Rows that fail to find a donor match are dropped from both
 scenarios, not just from `mixed`, so every comparison stays paired.
 
+Per-member predictions
+----------------------
+Each scenario's per-member predictions are written alongside the
+full-horizon scores (`write_results`, `members_file`), over exactly the
+paired rows above, so the paired differences can be scored afterwards for
+any lead month and resolution by the verification layer
+(pipeline/1_models/score.py sensitivity; seas5ml.scores.scenario_deltas).
+Both scenarios share the observations and Q_clim row for row; only Q_pred
+differs.
+
 Partial donor years
 -------------------
 A year at the record's edge can hold only part of its rows (e.g. Oct-Dec
@@ -334,21 +344,31 @@ def scenario_rows(fitted, scenarios, *, fold, model, config, t0, tag,
     climatology. One sensitivity_fold_metrics.csv row per (test year,
     scenario), printed as it comes; `t0` is the fold's start time, `tag` the
     printed label. `catchment` is passed to a pooled model's predict.
+
+    Returns (rows, members): `members` maps each scenario to its per-member
+    prediction frames, one per scored test year (the frames the rows were
+    scored from; `write_results` writes them, so the paired differences can
+    be scored per lead month afterwards: pipeline/1_models/score.py
+    sensitivity). A test year is kept only if every scenario scored it, so
+    the scenarios' frames stay paired.
     """
     from . import models
     from .evaluate import score_members
 
     predict_kw = {} if catchment is None else {'catchment': catchment}
     rows = []
+    members = {scenario: [] for scenario in SCENARIOS}
     for test_year, (frames, donor_year, n_rows, n_dropped,
                     donors) in scenarios.items():
+        year_rows, year_preds = [], {}
         for scenario in SCENARIOS:
             pred = models.predict(fitted, frames[scenario],
                                   score_years=[test_year], **predict_kw)
             scores = score_members(pred, test_year=test_year)
             if scores is None:
                 continue
-            rows.append({
+            year_preds[scenario] = pred
+            year_rows.append({
                 'fold': fold.id,
                 'hydro_year': test_year,
                 'scenario': scenario,
@@ -371,14 +391,65 @@ def scenario_rows(fitted, scenarios, *, fold, model, config, t0, tag,
                   f"{scores['acc']:+8.3f}  {scores['crps']:9.3f}  "
                   f"{donor_str:>6s}  {time.time() - t0:5.0f}s",
                   flush=True)
-    return rows
+        if len(year_preds) < len(SCENARIOS):
+            print(f"  {tag:>9s}  {test_year:6d}  WARNING: scored under "
+                  f"{sorted(year_preds) or 'no scenario'} only -- test year "
+                  f"left out (scenarios must be paired)")
+            continue
+        rows += year_rows
+        for scenario, pred in year_preds.items():
+            members[scenario].append(pred)
+    return rows, members
 
 
-def write_results(out_dir, mdf, *, catchment, model):
-    """sensitivity_fold_metrics.csv (the rows) and sensitivity_summary.csv
-    (per-scenario mean and std of every metric) into `out_dir`."""
+PAIR_KEYS = ['init_date', 'date', 'member']
+
+
+def check_paired(frames: dict) -> None:
+    """
+    Raise ValueError unless every scenario's member frame ({scenario: frame},
+    as written by `write_results`) holds the same (init_date, date, member)
+    rows with the same Q_raw and Q_clim: the paired-row guarantee, checked
+    on what was written. Only Q_pred may differ between scenarios.
+    """
+    names = list(frames)
+    ref = frames[names[0]].sort_values(PAIR_KEYS).reset_index(drop=True)
+    for name in names[1:]:
+        other = frames[name].sort_values(PAIR_KEYS).reset_index(drop=True)
+        if (len(other) != len(ref)
+                or not ref[PAIR_KEYS].equals(other[PAIR_KEYS])):
+            raise ValueError(f"scenario frames {names[0]} ({len(ref):,} rows) "
+                             f"and {name} ({len(other):,} rows) do not hold "
+                             f"the same (init_date, date, member) rows")
+        for col in ('Q_raw', 'Q_clim'):
+            if not np.array_equal(ref[col].to_numpy(float),
+                                  other[col].to_numpy(float), equal_nan=True):
+                raise ValueError(f"scenario frames {names[0]} and {name} "
+                                 f"differ in {col}")
+
+
+def members_file(scenario: str) -> str:
+    """File name of one scenario's per-member predictions in a stage-2 run
+    folder."""
+    if scenario not in SCENARIOS:
+        raise ValueError(f"unknown scenario '{scenario}' (one of {SCENARIOS})")
+    return f"predictions_members_{scenario}.parquet"
+
+
+def write_results(out_dir, mdf, *, catchment, model, members):
+    """
+    Into `out_dir`: sensitivity_fold_metrics.csv (the rows),
+    sensitivity_summary.csv (per-scenario mean and std of every metric) and
+    one member file per scenario (`members_file`), from `members`
+    ({scenario: frame}, every scored test year; seas5ml.io_results
+    .write_members format).
+    """
     import os
+    from .io_results import write_members
     os.makedirs(out_dir, exist_ok=True)
+    for scenario in SCENARIOS:
+        write_members(os.path.join(out_dir, members_file(scenario)),
+                      members[scenario])
     mdf.to_csv(os.path.join(out_dir, 'sensitivity_fold_metrics.csv'),
                index=False)
     summary = []

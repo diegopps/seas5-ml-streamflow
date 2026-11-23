@@ -1,5 +1,6 @@
 """
-seas5ml.io_results – Output assembly and writing for stage-1 runs.
+seas5ml.io_results – Output assembly and writing for stage-1 runs (and the
+member-file format stage 2 shares, `write_members`).
 
 Every run writes the same artefacts to its results directory
 (seas5ml.paths.run_dir / fold_dir):
@@ -48,6 +49,14 @@ def _ns_dates(df: pd.DataFrame) -> pd.DataFrame:
     merges cope, integer or numpy comparisons of dates do not."""
     cols = [c for c in DATE_COLS if c in df.columns]
     return df.astype({c: 'datetime64[ns]' for c in cols}) if cols else df
+
+
+def write_members(path, members: pd.DataFrame) -> None:
+    """A per-member prediction frame to `path` (parquet): the MEMBER_COLS it
+    has, dates as datetime64[ns]. The one format of every member file
+    (stage 1's predictions_members.parquet, stage 2's per-scenario files)."""
+    keep = [c for c in MEMBER_COLS if c in members.columns]
+    _ns_dates(members[keep]).to_parquet(path, index=False)
 
 
 def build_summary(catchment_id: str, model: str, mdf: pd.DataFrame,
@@ -107,6 +116,5 @@ def write_outputs(out_dir, mdf: pd.DataFrame, preds: pd.DataFrame,
         pd.DataFrame([summary]).to_csv(os.path.join(out_dir, 'summary.csv'),
                                        index=False)
     if members is not None and len(members) > 0:
-        keep = [c for c in MEMBER_COLS if c in members.columns]
-        _ns_dates(members[keep]).to_parquet(
-            os.path.join(out_dir, 'predictions_members.parquet'), index=False)
+        write_members(os.path.join(out_dir, 'predictions_members.parquet'),
+                      members)

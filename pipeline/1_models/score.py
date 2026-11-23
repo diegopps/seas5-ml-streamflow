@@ -16,6 +16,14 @@ One job scores one (catchment, variant) line-up:
             folds, plus the models without a tuned variant from their
             default run: ridge (RidgeCV selects its own alpha) and the
             baselines. The line-up of the main results.
+  sensitivity
+            stage 2's scenarios (ridge, rf, xgb, lstm, pooled_lstm): each
+            scenario's member predictions (predictions_members_<scenario>
+            .parquet, checked to be paired row for row) scored like any run,
+            plus deltas.csv, the paired per-year differences per (resolution,
+            lead month) against the normal scenario, signed so that positive
+            = the donor-year forcing hurt skill (seas5ml.scores
+            .scenario_deltas). Run after stage 2.
 
 A model's predictions are read from predictions_members.parquet where it
 exists (the learned models: CRPS over the members) and from
@@ -26,13 +34,15 @@ would pass unnoticed into the figures) unless --partial. Models without
 results are skipped with a note.
 
 Usage:
-    python pipeline/1_models/score.py <catchment> default|tuned
+    python pipeline/1_models/score.py <catchment> default|tuned|sensitivity
         [--model <m> ...] [--design loyo|split] [--partial]
+    (--partial applies to tuned only)
 
 Input (seas5ml.paths):
     data/results/<design>/default/<catchment>/<model>/predictions_*.parquet
     data/results/<design>/tuned/<catchment>/<model>/fold_<id>/predictions_members.parquet
     data/processed_data/<catchment>_folds_<design>.txt      (tuned: fold check)
+    data/results/<design>/sensitivity/<catchment>/<model>/predictions_members_<scenario>.parquet
 
 Output, per model (seas5ml.paths.scores_dir):
     data/results/<design>/scores/<variant>/<catchment>/<model>/
@@ -45,6 +55,11 @@ Output, per model (seas5ml.paths.scores_dir):
         stats.csv                     per resolution: periods kept / dropped
                                       (seas5ml.aggregate), where the
                                       predictions came from, folds read
+    sensitivity: the same four files with a leading `scenario` column
+    (normal, mixed), plus
+        deltas.csv                    one row per (corrupted scenario,
+                                      resolution, hydro year, lead month):
+                                      d_nse, d_kge, d_acc, d_crps, d_crpss
 """
 
 import argparse
@@ -60,10 +75,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root, for s
 import pandas as pd
 
 from seas5ml import designs, paths
+from seas5ml import sensitivity as sens
 from seas5ml.aggregate import RESOLUTIONS
 from seas5ml.catchments import CATCHMENTS
 from seas5ml.models import configs, references
-from seas5ml.scores import score_model
+from seas5ml.scores import scenario_deltas, score_model
 
 # The line-ups: (model, run it is read from).
 FROM_DEFAULT = (references.BASELINES + configs.LEARNED_MODELS
@@ -73,6 +89,9 @@ LINEUPS = {
     'tuned': ([(m, 'default') for m in references.BASELINES + ('ridge',)]
               + [(m, 'tuned') for m in configs.TUNED_MODELS
                  + configs.POOLED_MODELS]),
+    # Stage 2: the models that read the forcing (the baselines never do).
+    'sensitivity': [(m, 'sensitivity') for m in configs.LEARNED_MODELS
+                    + configs.POOLED_MODELS],
 }
 
 MEMBERS_FILE = 'predictions_members.parquet'
@@ -154,6 +173,20 @@ def load_tuned(design, catchment, model, *, partial):
                    'n_folds_missing': len(missing)}
 
 
+def load_sensitivity(design, catchment, model):
+    """A stage-2 run's member frame per scenario, checked to be paired
+    (sens.check_paired); ({scenario: frame}, info) or (None, reason)."""
+    run = paths.run_dir(design, 'sensitivity', catchment, model)
+    files = {s: run / sens.members_file(s) for s in sens.SCENARIOS}
+    absent = [p.name for p in files.values() if not p.exists()]
+    if absent:
+        return None, f"no {', '.join(absent)} in {run}"
+    frames = {s: _read(p) for s, p in files.items()}
+    sens.check_paired(frames)
+    return frames, {'source': 'sensitivity/predictions_members_<scenario>'
+                              '.parquet'}
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # WRITING
 # ═══════════════════════════════════════════════════════════════════════
@@ -170,6 +203,51 @@ def write_scores(out_dir, result, info):
     pd.DataFrame([{'resolution': res, **r['stats'], **info}
                   for res, r in result.items()]
                  ).to_csv(out_dir / 'stats.csv', index=False)
+
+
+def write_sensitivity_scores(out_dir, results, info):
+    """
+    The tables of every scenario's `score_model` result ({scenario: result})
+    into out_dir, each with a leading `scenario` column (one file per table,
+    as for the other variants), plus deltas.csv: the paired per-year
+    differences of every corrupted scenario against normal
+    (seas5ml.scores.scenario_deltas). Returns the deltas.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    def tagged(frames):
+        return pd.concat([f.assign(scenario=s)[['scenario'] + list(f.columns)]
+                          for s, f in frames], ignore_index=True)
+
+    yearly = {s: pd.concat([r['yearly'] for r in res.values()],
+                           ignore_index=True) for s, res in results.items()}
+    tagged(yearly.items()).to_csv(out_dir / 'yearly.csv', index=False)
+    tagged([(s, r['cells']) for s, res in results.items()
+            for r in res.values()]).to_csv(out_dir / 'cells.csv', index=False)
+    for res_name in RESOLUTIONS:
+        tagged([(s, res[res_name]['ens']) for s, res in results.items()]
+               ).to_parquet(out_dir / f'ensemble_{res_name}.parquet',
+                            index=False)
+    pd.DataFrame([{'scenario': s, 'resolution': res_name,
+                   **res[res_name]['stats'], **info}
+                  for s, res in results.items() for res_name in res]
+                 ).to_csv(out_dir / 'stats.csv', index=False)
+    deltas = pd.concat([scenario_deltas(yearly['normal'], yearly[s], s)
+                        for s in sens.SCENARIOS if s != 'normal'],
+                       ignore_index=True)
+    deltas.to_csv(out_dir / 'deltas.csv', index=False)
+    return deltas
+
+
+def print_deltas(deltas):
+    """Median paired delta per lead month (ACC, CRPSS), to the log."""
+    for (scen, res), d in deltas.groupby(['scenario', 'resolution'],
+                                         sort=False):
+        med = d.groupby('lead_month')[['d_acc', 'd_crpss']].median()
+        print(f"    {scen} {res:>7s} median d_acc by lead month: "
+              + " ".join(f"{v:+.3f}" for v in med['d_acc'])
+              + " | d_crpss: "
+              + " ".join(f"{v:+.3f}" for v in med['d_crpss']))
 
 
 def print_result(model, result):
@@ -203,6 +281,24 @@ def main():
     for model, src in lineup:
         t_model = time.time()
         print(f"\n── {model} ({src} run) ──", flush=True)
+        out_dir = paths.scores_dir(args.design, args.variant,
+                                   args.catchment, model)
+        if src == 'sensitivity':
+            frames, info = load_sensitivity(args.design, args.catchment,
+                                            model)
+            if frames is None:
+                print(f"  skipped: {info}")
+                skipped.append(model)
+                continue
+            results = {}
+            for scen, pred in frames.items():
+                print(f"  {scen}: {len(pred):,} member rows", flush=True)
+                results[scen] = score_model(pred, design=args.design)
+                print_result(model, results[scen])
+            print_deltas(write_sensitivity_scores(out_dir, results, info))
+            print(f"  Saved {out_dir}/  ({time.time() - t_model:.0f}s)")
+            scored.append(model)
+            continue
         if src == 'default':
             pred, info = load_default(args.design, args.catchment, model)
         else:
@@ -215,8 +311,6 @@ def main():
         print(f"  {len(pred):,} daily rows from {info['source']}")
         result = score_model(pred, design=args.design)
         print_result(model, result)
-        out_dir = paths.scores_dir(args.design, args.variant,
-                                   args.catchment, model)
         write_scores(out_dir, result, info)
         print(f"  Saved {out_dir}/  ({time.time() - t_model:.0f}s)")
         scored.append(model)
