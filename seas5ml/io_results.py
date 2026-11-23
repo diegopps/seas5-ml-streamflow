@@ -38,6 +38,17 @@ def write_folds(out_dir, folds) -> None:
 MEMBER_COLS = ['date', 'init_date', 'member', 'lead_day', 'hydro_year',
                'Q_raw', 'Q_pred', 'Q_clim']
 
+DATE_COLS = ('date', 'init_date')
+
+
+def _ns_dates(df: pd.DataFrame) -> pd.DataFrame:
+    """`df` with every date column as datetime64[ns]. Models build their
+    frames differently (the LSTM from Python timestamps, the others from the
+    feature table), which left init_date in ns for one and ms for the rest:
+    merges cope, integer or numpy comparisons of dates do not."""
+    cols = [c for c in DATE_COLS if c in df.columns]
+    return df.astype({c: 'datetime64[ns]' for c in cols}) if cols else df
+
 
 def build_summary(catchment_id: str, model: str, mdf: pd.DataFrame,
                   runtime_s: float, has_crps: bool, extra: dict = None) -> dict:
@@ -85,16 +96,17 @@ def write_outputs(out_dir, mdf: pd.DataFrame, preds: pd.DataFrame,
     Write fold_metrics.csv, predictions_daily.parquet and, if given,
     summary.csv and predictions_members.parquet (the per-member frame of an
     ensemble model; deterministic baselines pass None, their members being
-    identical by construction).
+    identical by construction). Date columns are written as datetime64[ns]
+    for every model (`_ns_dates`).
     """
     os.makedirs(out_dir, exist_ok=True)
     mdf.to_csv(os.path.join(out_dir, 'fold_metrics.csv'), index=False)
-    preds.to_parquet(os.path.join(out_dir, 'predictions_daily.parquet'),
-                     index=False)
+    _ns_dates(preds).to_parquet(
+        os.path.join(out_dir, 'predictions_daily.parquet'), index=False)
     if summary is not None:
         pd.DataFrame([summary]).to_csv(os.path.join(out_dir, 'summary.csv'),
                                        index=False)
     if members is not None and len(members) > 0:
         keep = [c for c in MEMBER_COLS if c in members.columns]
-        members[keep].to_parquet(
+        _ns_dates(members[keep]).to_parquet(
             os.path.join(out_dir, 'predictions_members.parquet'), index=False)

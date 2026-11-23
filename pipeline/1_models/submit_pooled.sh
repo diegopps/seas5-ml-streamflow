@@ -40,21 +40,29 @@ POOL=(ulkenboken zeravshan esil ayat kalkutan kurshim zhabay kirchbichl diepolds
 MODEL=pooled_lstm
 DESIGN=loyo
 
-# Slurm routing per variant: "partition qos cpus mem time".
-# default / tuned: set mem and time from the timing variant's report
-# (run `submit_pooled.sh timing` for the design first).
+# Slurm routing per variant (and design): "partition qos cpus mem time".
+# default / tuned from the timing reports of 2026-11-20 (24 CPUs, which the
+# cluster allocates whatever is requested; peak memory 16 GB):
+#   loyo   default expected 28.5 h (upper bound 63.6 h at 50 epochs),
+#          tuned per fold 72.5 h (163 h)
+#   split  default 0.4 h (0.9 h), tuned 40.9 h (95.5 h)
+# Every job resumes when resubmitted, so a walltime below the upper bound
+# costs a resubmission, not the work done.
 declare -A ROUTE=(
     [timing]="standard  medium 16 128G 2-00:00:00"
-    [default]="standard medium 16 TBD  TBD"
-    [tuned]="standard   medium 16 TBD  TBD"
+    [default_loyo]="standard  medium 16 32G 3-00:00:00"
+    [tuned_loyo]="standard    medium 16 32G 4-13:00:00"
+    [default_split]="standard medium 16 32G 0-02:00:00"
+    [tuned_split]="standard   medium 16 32G 4-00:00:00"
 )
 
 VARIANT="$1"
 shift
-if [[ -z "${ROUTE[$VARIANT]:-}" ]]; then
-    echo "Usage: bash $0 timing|default|tuned [--model <m>] [--design <d>]"
-    exit 1
-fi
+case "$VARIANT" in
+    timing|default|tuned) ;;
+    *) echo "Usage: bash $0 timing|default|tuned [--model <m>] [--design <d>]"
+       exit 1 ;;
+esac
 
 while [[ "$1" == --* ]]; do
     case "$1" in
@@ -63,7 +71,12 @@ while [[ "$1" == --* ]]; do
         *) echo "ERROR: unknown option $1"; exit 1 ;;
     esac
 done
-read -r PARTITION QOS CPUS MEM WALLTIME <<< "${ROUTE[$VARIANT]}"
+ROUTE_KEY=$([[ "$VARIANT" == "timing" ]] && echo timing || echo "${VARIANT}_${DESIGN}")
+if [[ -z "${ROUTE[$ROUTE_KEY]:-}" ]]; then
+    echo "ERROR: no Slurm route for ${VARIANT} under design ${DESIGN}"
+    exit 1
+fi
+read -r PARTITION QOS CPUS MEM WALLTIME <<< "${ROUTE[$ROUTE_KEY]}"
 
 submit() {   # submit <job-tag> <run_pooled.py args...>
     local tag="$1"; shift

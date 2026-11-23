@@ -54,7 +54,7 @@ case "$VARIANT" in
             [ridge]="standard       short  8 128G 12:00:00"
             [rf]="standard          short  8 128G 12:00:00"
             [xgb]="standard         short  8 128G 12:00:00"
-            [lstm]="standard        short 16 128G 12:00:00"
+            [lstm]="standard        short 16 128G 24:00:00"
         )
         ;;
     tuned)
