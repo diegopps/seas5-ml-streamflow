@@ -337,6 +337,66 @@ def run_epoch(model, loader, optimizer, amp_scaler, is_train, loss_fn=None):
 
 
 @torch.no_grad()
+def validation_loss(model, loader, loss_fn=None):
+    """
+    The early-stopping criterion: `loss_fn` evaluated over the whole
+    validation set at once, accumulated in float64:
+        nse_loss_anomaly / nse_loss_real   1 - NSE over every validation step
+                                           (against the mean of the whole set)
+        nse_star_loss                      weighted squared error averaged
+                                           over every validation step
+    Not the mean over batches of the batch loss (run_epoch): the per-batch
+    NSE compares each batch with its own mean, and the unshuffled validation
+    batches each cover only a few consecutive start dates, so that criterion
+    measured skill against a local-mean reference (checked on wave 1,
+    TODO.md). NaN if no step is valid.
+    """
+    loss_fn = _LOSS_FN if loss_fn is None else loss_fn
+    if loss_fn not in (nse_loss_anomaly, nse_loss_real, nse_star_loss):
+        raise ValueError(f"validation_loss: no whole-set form of {loss_fn}")
+    model.eval()
+    sse = n = s_o = s_oo = 0.0
+
+    for fc_dyn, tgt, aux, fc_mask in loader:
+        fc_dyn = fc_dyn.to(DEVICE)
+        tgt = tgt.to(DEVICE)
+        aux = aux.to(DEVICE)
+        fc_mask = fc_mask.to(DEVICE)
+
+        valid = fc_mask & torch.isfinite(tgt)
+        if not valid.any():
+            continue
+
+        if USE_AMP:
+            with torch.autocast(device_type='cuda', dtype=AMP_DTYPE):
+                pred = model(fc_dyn)
+        else:
+            pred = model(fc_dyn)
+        p = pred[valid].double()
+        o = tgt[valid].double()
+        a = aux[valid].double()
+
+        if loss_fn is nse_star_loss:          # aux = per-step weight
+            sse += (a * (p - o) ** 2).sum().item()
+            n += o.numel()
+            continue
+        if loss_fn is nse_loss_real:          # aux = climatology
+            p = torch.expm1(p + a).clamp(min=0.0)
+            o = torch.expm1(o + a).clamp(min=0.0)
+        sse += ((p - o) ** 2).sum().item()
+        n += o.numel()
+        s_o += o.sum().item()
+        s_oo += (o * o).sum().item()
+
+    if n == 0:
+        return np.nan
+    if loss_fn is nse_star_loss:
+        return sse / n
+    ss_tot = s_oo - s_o ** 2 / n
+    return sse / (ss_tot + 1e-6 * ss_tot + 1e-8)   # eps as in the batch losses
+
+
+@torch.no_grad()
 def predict_trajectories(model, trajectories):
     model.eval()
     records = []
@@ -376,8 +436,11 @@ def train_net(model, tr_loader, val_loader, config, loss_fn=None):
     Train `model` with Adam and ReduceLROnPlateau, early-stopping on the
     validation loss (PATIENCE epochs, at most MAX_EPOCHS), and load the
     weights of the best validation epoch into it. Shared by the single and
-    the pooled LSTM; `loss_fn` as in `run_epoch`. Returns (best_epoch,
-    best_val_loss, n_epochs), n_epochs being the epochs actually run.
+    the pooled LSTM; `loss_fn` as in `run_epoch`. Training minimises the
+    per-batch loss; the validation loss (scheduler and early stopping) is
+    the same loss over the whole validation set (`validation_loss`).
+    Returns (best_epoch, best_val_loss, n_epochs), n_epochs being the epochs
+    actually run.
     """
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'],
                                  weight_decay=config['wd'])
@@ -394,8 +457,7 @@ def train_net(model, tr_loader, val_loader, config, loss_fn=None):
     for epoch in range(1, MAX_EPOCHS + 1):
         n_epochs = epoch
         run_epoch(model, tr_loader, optimizer, amp_scaler, True, loss_fn)
-        val_loss = run_epoch(model, val_loader, optimizer, amp_scaler, False,
-                             loss_fn)
+        val_loss = validation_loss(model, val_loader, loss_fn)
         scheduler.step(val_loss)
 
         if val_loss < best_val_loss:
