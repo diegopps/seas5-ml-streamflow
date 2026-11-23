@@ -256,7 +256,9 @@ def print_result(model, result):
         acc = y['acc'].median() if len(y) else float('nan')
         print(f"    {res:>7s}: kept {s['kept']:,} periods (dropped: "
               f"{s['incomplete']:,} incomplete, {s['crosses_hydro_year']:,} "
-              f"crossing 1 Oct, {s['beyond_grid']:,} beyond lead month 7) | "
+              f"crossing 1 Oct, {s['beyond_grid']:,} beyond lead month 7; "
+              f"{s['contrib_dropped']:,} start-months not covered at every "
+              f"resolution) | "
               f"{y['hydro_year'].nunique()} years, {len(y)} yearly rows, "
               f"median ACC {acc:+.3f} | {int(c['acc'].notna().sum())}/"
               f"{len(c)} cells", flush=True)
@@ -293,7 +295,8 @@ def main():
             results = {}
             for scen, pred in frames.items():
                 print(f"  {scen}: {len(pred):,} member rows", flush=True)
-                results[scen] = score_model(pred, design=args.design)
+                results[scen] = score_model(pred, design=args.design,
+                                            model=model)
                 print_result(model, results[scen])
             print_deltas(write_sensitivity_scores(out_dir, results, info))
             print(f"  Saved {out_dir}/  ({time.time() - t_model:.0f}s)")
@@ -309,7 +312,7 @@ def main():
             skipped.append(model)
             continue
         print(f"  {len(pred):,} daily rows from {info['source']}")
-        result = score_model(pred, design=args.design)
+        result = score_model(pred, design=args.design, model=model)
         print_result(model, result)
         write_scores(out_dir, result, info)
         print(f"  Saved {out_dir}/  ({time.time() - t_model:.0f}s)")

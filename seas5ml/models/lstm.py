@@ -167,9 +167,17 @@ def raw_trajectories(df, doy_clim, score_years=None, init_years=None):
         fc_dyn = grp[DYN_VARS].values.astype(np.float32)
         q_raw_fc = grp['Q'].values.astype(np.float64)
         doy_fc = grp['date'].dt.dayofyear.values
+        # The climatology and observations stay float64: they are written
+        # out as Q_clim / Q_raw, which must equal every other model's row for
+        # row (the scoring layer pairs them), and Q_clim back-transforms the
+        # prediction. Only the network's tensors are float32: the target is
+        # built from the float32-rounded climatology, and the dataset's
+        # climatology is cast to float32 by collate_fn, so training is
+        # unchanged by the float64 copies.
         q_clim_fc = np.array([doy_clim.get(d, np.nan) for d in doy_fc],
-                             dtype=np.float32)
-        target_fc = (np.log1p(q_raw_fc) - q_clim_fc).astype(np.float32)
+                             dtype=np.float64)
+        target_fc = (np.log1p(q_raw_fc)
+                     - q_clim_fc.astype(np.float32)).astype(np.float32)
         hy = grp[GROUP_COL].values.astype(int)
         scored = (np.isin(hy, list(score_years)) if score_years is not None
                   else np.ones(len(grp), dtype=bool))
@@ -181,7 +189,7 @@ def raw_trajectories(df, doy_clim, score_years=None, init_years=None):
             'fc_dyn': fc_dyn,
             'target': target_fc,
             'q_clim': q_clim_fc,
-            'q_raw': q_raw_fc.astype(np.float32),
+            'q_raw': q_raw_fc,
             'date': grp['date'].values,
             'init_date': init_date,
             'member': member,
