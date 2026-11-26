@@ -54,7 +54,7 @@ from matplotlib.lines import Line2D
 
 from . import common as pl
 from .. import paths
-from .boxplots import window_crps, CRPSS_REFERENCE
+from .windows import window_crps, CRPSS_REFERENCE   # legacy, until stage 2 moves to the score tables
 
 def default_results_dir() -> str:
     """Stage-2 output of the selected design (plots.common.DESIGN); `run`

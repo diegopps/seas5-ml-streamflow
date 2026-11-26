@@ -2,12 +2,20 @@
 """
 Stage 1 plots, per variant.
 
-default  (data/results/<design>/default/<catchment>/<model>/)
-    01a_boxplotcomparison_short   NSE, KGE, ACC, CRPSS per test year, lead
-                                  days 0-30; one row per catchment
-    01b_boxplotcomparison_long    same, lead days 185-214
-    02_leadtimeheatmap            ACC by lead time x init month, one panel
-                                  per (catchment, model)
+default  (score tables: data/results/<design>/scores/default/<catchment>/<model>/,
+          written by pipeline/1_models/score.py; run that first)
+    01_leadcurves_acc             ACC by lead month 1-7, daily / weekly /
+                                  monthly side by side, as the difference
+                                  from damped persistence (median over years,
+                                  IQR, significance); one row per catchment
+    01_leadcurves_crpss           same for CRPSS
+    02_boxplots_daily_lm1         NSE, KGE, ACC, CRPSS per test year, daily,
+                                  lead month 1; one row per catchment
+    03_heatmap_{daily,weekly,monthly}
+                                  pooled ACC by start month x lead month, one
+                                  panel per (catchment, model), one figure per
+                                  resolution
+    Each figure also writes a .csv of the values it plots.
 
 tuned    (data/results/<design>/tuned/<catchment>/<model>/fold_<id>/,
           plus the default run, for the untuned and reference boxes)
@@ -28,7 +36,7 @@ Figures go to data/results/<design>/figures/, as .pdf.
 Usage:
     python pipeline/1_models/plot.py default                       # every catchment with results
     python pipeline/1_models/plot.py default zeravshan kurshim     # specific catchments
-    python pipeline/1_models/plot.py default --by-regime           # heatmap grid split into
+    python pipeline/1_models/plot.py default --by-regime           # heatmap grids split into
                                                                    # one figure per regime
     python pipeline/1_models/plot.py tuned [catchments ...]
     (add --design <design> for another evaluation design; default loyo)
@@ -43,7 +51,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root, for s
 
 from seas5ml import designs
 from seas5ml.plots import common as pl
-from seas5ml.plots import boxplots, configrank, heatmap, tuningvsref
+from seas5ml.plots import (boxplots, configrank, heatmap, leadcurves,
+                           tuningvsref)
 
 
 def plot_default(catchments, by_regime):
@@ -52,20 +61,19 @@ def plot_default(catchments, by_regime):
         sys.exit(1)
     os.makedirs(pl.PLOT_DIR, exist_ok=True)
 
-    print("\n=== Boxplot comparison (short lead, 0-30 d) ===")
-    boxplots.run(catchments, 0, 30,
-                 f"{pl.design_label()} Aggregate Skill\n"
-                 f"(Short) Lead time: 0-30 days",
-                 "01a_boxplotcomparison_short")
+    for metric in leadcurves.METRICS:
+        print(f"\n=== Lead-month curves: {metric.upper()} vs damped "
+              f"persistence ===")
+        leadcurves.run(catchments, metric, variant="default")
 
-    print("\n=== Boxplot comparison (long lead, 185-214 d) ===")
-    boxplots.run(catchments, 185, 214,
-                 f"{pl.design_label()} Aggregate Skill\n"
-                 f"(Long) Lead time: 185-214 days",
-                 "01b_boxplotcomparison_long")
+    print("\n=== Per-year boxplots (daily, lead month 1) ===")
+    boxplots.run(catchments, variant="default", resolution="daily",
+                 lead_month=1)
 
-    print("\n=== Lead-time x init-month heatmap grid ===")
-    heatmap.run(catchments, by_regime=by_regime)
+    for res in pl.RESOLUTIONS:
+        print(f"\n=== Start month x lead month heatmap ({res}) ===")
+        heatmap.run(catchments, variant="default", resolution=res,
+                    by_regime=by_regime)
 
 
 def plot_tuned(catchments):
@@ -103,7 +111,8 @@ def main():
     p.add_argument('variant', choices=('default', 'tuned'))
     p.add_argument('catchments', nargs='*', type=str.lower)
     p.add_argument('--by-regime', action='store_true',
-                   help="default: one heatmap figure per regime group")
+                   help="default: one heatmap figure per regime group and "
+                        "resolution")
     p.add_argument('--design', default=designs.DEFAULT_DESIGN,
                    choices=designs.DESIGNS)
     args = p.parse_args()

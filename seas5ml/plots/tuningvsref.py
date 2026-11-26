@@ -55,7 +55,7 @@ Shared y-limits:
   than being allowed to blow out the shared axis.
 
 The ACC column carries the same day-of-year reference line as the default
-boxplots (boxplots.doy_reference_acc): median across years, scored with the
+boxplots (plots.windows.doy_reference_acc): median across years, scored with the
 same calc_acc on the default run's climatology rows, so both figures show the
 identical value.
 
@@ -77,10 +77,12 @@ import matplotlib.lines as mlines
 from . import common as pl
 from ..metrics import calc_nse, calc_kge, calc_acc
 from ..metrics import crps_from_pred_df
-from .boxplots import (fold_metrics_in_window, window_crps, window_crpss,
-                            CRPSS_REFERENCE, doy_reference_acc,
-                            DOY_REF_COLOR, DOY_REF_LABEL, Y_LIM,
-                            draw_below_floor_counts)
+# Legacy window scoring (plots.windows) until this figure moves to the
+# score tables at the tuned stage; drawing helpers from the boxplots.
+from .windows import (fold_metrics_in_window, window_crps, window_crpss,
+                      CRPSS_REFERENCE, doy_reference_acc)
+from .boxplots import (DOY_REF_COLOR, DOY_REF_LABEL, Y_LIM,
+                       draw_below_floor_counts)
 
 TUNED_MODELS = ["rf", "xgb", "lstm", "pooled_lstm"]
 REF_MODELS = ["climatology", "damped_persistence"]

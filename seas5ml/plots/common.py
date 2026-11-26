@@ -85,6 +85,17 @@ def catchment_letter(i: int) -> str:
     return chr(ord('A') + i)
 
 
+def catchment_row_label(i: int, name: str, max_chars: int = 14) -> str:
+    """'A)  Name' for the row label of grid figure row `i`. A display name
+    longer than `max_chars` is broken at its hyphen onto two lines, so a
+    rotated label stays within a short row (e.g. Kirchbichl-Bichlwang)."""
+    display = catchment_display(name)
+    if len(display) > max_chars and "-" in display:
+        head, tail = display.split("-", 1)
+        display = f"{head}-\n{tail}"
+    return f"{catchment_letter(i)})  {display}"
+
+
 def order_catchments(catchments: list) -> list:
     """Order given catchments by regime group, in `REGIME_GROUPS` order
     (mountain, then steppe, then europe), with any unrecognised
@@ -193,6 +204,7 @@ MODEL_LABELS = {
     "climatology":        "Climatology",
     "persistence":        "Persistence",
     "damped_persistence": "Damped persistence",
+    "doy_reference":      "Day-of-year reference",
     "ridge":              "Ridge",
     "rf":                 "Random Forest",
     "xgb":                "XGBoost",
@@ -203,12 +215,24 @@ MODEL_LABELS_BAR = {
     "climatology":        "Clim",
     "persistence":        "Pers",
     "damped_persistence": "DPers",
+    "doy_reference":      "DOY",
     "ridge":              "Ridge",
     "rf":                 "RF",
     "xgb":                "XGB",
     "lstm":               "LSTM",
     "pooled_lstm":        "P-LSTM",
 }
+
+# The day-of-year reference: the unsmoothed day-of-year mean of the fold's
+# training years (seas5ml.models.references). Not a forecast to rank, a line
+# to read skill against (ACC above it is skill beyond the seasonal cycle), so
+# it is drawn as a dashed line, never a box, and at daily resolution only:
+# its point is sub-31-day seasonal detail, which weekly / monthly means
+# average away (its weekly / monthly cell ACC is blanked in the score tables,
+# seas5ml.scores.BLANK_CELLS).
+DOY_REFERENCE = "doy_reference"
+DOY_REF_COLOR = "#8B1E3F"
+DOY_REF_RESOLUTIONS = ("daily",)
 # Colorblind-friendly categorical palette (validated adjacent-pair order).
 # climatology stays neutral grey (it is the no-skill floor, not a model to
 # distinguish). persistence / damped_persistence share the blue hue family
@@ -229,6 +253,7 @@ MODEL_COLORS = {
     "xgb":                "#e87ba4",  # magenta
     "lstm":               "#008300",  # green
     "pooled_lstm":        "#eda100",  # yellow
+    "doy_reference":      DOY_REF_COLOR,  # claret, always dashed
 }
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -383,6 +408,83 @@ def load_member_predictions(catchment: str, model: str):
     """
     return _read_predictions(paths.run_dir(DESIGN, "default", catchment, model)
                              / "predictions_members.parquet")
+
+# ═══════════════════════════════════════════════════════════════════════
+# DATA LOADERS — score tables (seas5ml.scores, pipeline/1_models/score.py)
+#
+# The verification layer's tables, per (variant, catchment, model), in
+# data/results/<design>/scores/<variant>/<catchment>/<model>/:
+#   yearly.csv  one row per (resolution, hydro_year, lead_month): n_starts,
+#               n, nse, kge, acc, crps, crps_clim, crpss
+#   cells.csv   one row per (resolution, start_month, lead_month): n_years,
+#               n, acc (NaN where too few years, seas5ml.scores.MIN_CELL_YEARS,
+#               or blanked, seas5ml.scores.BLANK_CELLS)
+# The same starts and years are scored at every resolution, so a figure can
+# set resolutions side by side. Figures read these tables and recompute
+# nothing.
+# ═══════════════════════════════════════════════════════════════════════
+
+RESOLUTIONS = ("daily", "weekly", "monthly")
+RESOLUTION_LABELS = {"daily": "Daily", "weekly": "Weekly",
+                     "monthly": "Monthly"}
+LEAD_MONTHS = tuple(range(1, 8))
+
+
+def _load_score_table(catchment: str, model: str, table: str, variant: str,
+                      resolution=None):
+    path = paths.scores_dir(DESIGN, variant, catchment, model) / f"{table}.csv"
+    if not path.exists():
+        return None
+    df = pd.read_csv(path)
+    if resolution is not None:
+        df = df[df["resolution"] == resolution].reset_index(drop=True)
+    return df
+
+
+def load_yearly(catchment: str, model: str, variant: str = "default",
+                resolution=None):
+    """yearly.csv of one (variant, catchment, model), optionally one
+    resolution's rows; None if the model has no scores."""
+    return _load_score_table(catchment, model, "yearly", variant, resolution)
+
+
+def load_cells(catchment: str, model: str, variant: str = "default",
+               resolution=None):
+    """cells.csv of one (variant, catchment, model), optionally one
+    resolution's rows; None if the model has no scores."""
+    return _load_score_table(catchment, model, "cells", variant, resolution)
+
+
+def scored_models(catchment: str, variant: str = "default",
+                  models=None) -> list:
+    """The models of `models` (default: MODEL_ORDER + doy_reference) with a
+    yearly.csv for this catchment, in that order. A model without scores
+    (e.g. pooled_lstm before its run) is simply left out of the figure."""
+    models = list(MODEL_ORDER) + [DOY_REFERENCE] if models is None else models
+    return [m for m in models
+            if (paths.scores_dir(DESIGN, variant, catchment, m)
+                / "yearly.csv").exists()]
+
+
+def paired_with_reference(model_yearly: pd.DataFrame,
+                          ref_yearly: pd.DataFrame, metric: str):
+    """
+    A model's per-year `metric` paired with the reference's, by
+    (resolution, lead_month, hydro_year). Both frames come from load_yearly
+    of the same variant and catchment. Rows where either score is NaN are
+    dropped. Returns columns resolution, lead_month, hydro_year, model, ref,
+    diff (= model - ref).
+
+    Pairing by year keeps the comparison on the same years and starts
+    (the score tables score every model on the same ones), and it removes
+    the year-to-year variation the two forecasts share.
+    """
+    key = ["resolution", "lead_month", "hydro_year"]
+    m = model_yearly[key + [metric]].rename(columns={metric: "model"})
+    r = ref_yearly[key + [metric]].rename(columns={metric: "ref"})
+    j = m.merge(r, on=key, how="inner").dropna(subset=["model", "ref"])
+    j["diff"] = j["model"] - j["ref"]
+    return j.reset_index(drop=True)
 
 # ═══════════════════════════════════════════════════════════════════════
 # DATA LOADERS — stage 1, tuned run (one folder per fold)

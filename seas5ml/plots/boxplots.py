@@ -1,49 +1,34 @@
 """
-seas5ml.plots.boxplots – Model comparison boxplots (NSE, KGE, ACC, CRPSS).
+seas5ml.plots.boxplots – Per-year model comparison (NSE, KGE, ACC, CRPSS).
 
-Produces two merged figures across catchments, one per lead-time window:
+One figure, at one (resolution, lead month); the stage-1 default figure is
+daily resolution, lead month 1 (the first calendar month of each forecast):
 
-  01a_boxplotcomparison_short.pdf — lead_day 0-30
-  01b_boxplotcomparison_long.pdf  — lead_day 185-214
+  02_boxplots_daily_lm1.pdf  (+ .csv of the box statistics)
 
-Both windows are 30 days wide on purpose (equal sample size per fold) so box
-widths are comparable between the two figures. Per-fold NSE/KGE/ACC are
-recomputed directly from predictions_daily.parquet, filtered to the window's
-lead_day range — fold_metrics.csv pools all 215 lead days into one score and
-has no lead breakdown, so it cannot be used as the data source here.
+How skill changes with lead time is the lead-month curves' job
+(plots.leadcurves); this figure shows the spread over years and the
+absolute level of every score at the shortest lead.
 
-CRPS appears as a skill score against climatology, not raw. Two reasons: raw
-CRPS carries the units of discharge, so it cannot share one hardcoded axis
-across catchments of different size; and it is lower-is-better, which would
-invert the reading of the panel beside it. CRPSS = 1 - CRPS/CRPS_clim is
-dimensionless, capped at 1, and higher-is-better like the other three.
+Rows = catchments, columns = metrics, one box per model (colour = model, see
+the shared legend); a box is the model's per-year scores over the test years.
+Data: the score tables (plots.common.load_yearly), the same years and starts
+for every model. CRPSS is against deterministic climatology, so climatology
+itself (identically 0) has no CRPSS box, and its ACC is undefined.
 
-Per-fold CRPS within a window needs the per-member predictions, read from
-predictions_members.parquet. Deterministic baselines write no such file, but
-their members are identical, so their CRPS is exactly MAE and is taken from
-the ensemble-mean file instead. Climatology is the reference and would be
-identically zero, so it is left out of the CRPSS panel.
-
-The ACC column also carries the day-of-year reference as a dashed horizontal
-line at its median across folds (see doy_reference_acc). It is a forecast
-that knows nothing but the date, resolving the seasonal cycle more finely than
-the 31-day climatology, so ACC above that line rather than above zero is skill
-beyond the seasonal cycle. It is scored with the same calc_acc, against the
-same stored (per-fold) climatology, on the same rows as the reference boxes.
-
-Statistical notes:
-  - Boxplots (median + IQR) are used instead of mean +/- SE bars, since
-    fold-level metrics are often skewed.
-  - Y-axis limits are hardcoded to (-0.5, 1.0) for every panel in both
-    figures, rather than fit to the data. Per-fold NSE is unbounded below on
-    ephemeral rivers (it normalises by that year's own flow variance, which
-    can be tiny in a low-flow year), so a handful of folds routinely fall far
-    below any reasonable axis. Folds below the floor are counted and marked
-    with a small annotation at the bottom of their box instead of being
-    allowed to blow out the shared axis.
+  - ACC column: the day-of-year reference's median ACC as a dashed line
+    (daily resolution only, plots.common.DOY_REF_RESOLUTIONS). ACC above it is
+    skill beyond the seasonal cycle.
+  - Significance: every learned model against damped persistence, paired over
+    years (plots.common.paired_tests_vs_reference: paired bootstrap of the
+    mean difference, Benjamini-Hochberg per metric over the figure), as a
+    symbol above the box.
+  - The y axis is fixed to Y_LIM for every panel: per-year NSE is unbounded
+    below on ephemeral rivers, so years below the floor are counted and
+    marked at the bottom of their box instead.
+  - Split design (3-8 test years): every year is also drawn as a dot over
+    its box, since a box hides how few points it has.
 """
-
-from functools import lru_cache
 
 import numpy as np
 import pandas as pd
@@ -52,7 +37,6 @@ import matplotlib.patches as mpatches
 import matplotlib.lines as mlines
 
 from . import common as pl
-from ..metrics import calc_nse, calc_kge, calc_acc, crps_from_pred_df
 
 # Built at print size (pl.FIG_WIDTH_IN wide). Eight boxes per panel leave no
 # room for model names under them at this width, so boxes are identified by
@@ -62,6 +46,8 @@ BAR_LEGEND_HEIGHT  = 0.75   # inches reserved below the grid for the legend
 BOX_WIDTH          = 0.7
 BOX_ALPHA          = 0.85
 ANNOT_OFFSET_FRAC  = 0.025
+DOT_SIZE           = 1.6
+DOT_JITTER         = 0.18
 
 Y_LIM = (-2.0, 1.0)
 
@@ -72,188 +58,49 @@ METRICS = [
     {"key": "crpss", "title": "CRPSS"},   # reference (climatology) stated in the caption
 ]
 
-# Baselines are identical across members, so their CRPS is exactly MAE and is
-# read from the ensemble-mean file. Everything else needs the member frame.
+# Not tested against damped persistence: the baselines themselves.
 DETERMINISTIC_MODELS = {"climatology", "persistence", "damped_persistence"}
 CRPSS_REFERENCE = "climatology"
 
-# Day-of-year reference line in the ACC column. Its rows (dates, folds, Q_raw,
-# Q_clim) are taken from the climatology baseline's predictions, so it is
-# scored on exactly the rows the reference boxes are.
-DOY_REF_SCAFFOLD = "climatology"
-DOY_REF_COLOR    = "#8B1E3F"
-DOY_REF_LABEL    = "Day-of-year reference (median)"
+DOY_REF_COLOR = pl.DOY_REF_COLOR
+DOY_REF_LABEL = "Day-of-year reference (median)"
 
 
-def fold_metrics_in_window(catchment, model, lo, hi, min_rows=30):
-    """Per-fold NSE/KGE/ACC restricted to lead_day in [lo, hi]."""
-    df = pl.load_predictions(catchment, model)
-    if df is None:
-        return None
-    sub = (df[(df['lead_day'] >= lo) & (df['lead_day'] <= hi)]
-             .dropna(subset=['Q_raw', 'Q_pred', 'Q_clim']))
-    rows = []
-    for hy, g in sub.groupby('hydro_year'):
-        if len(g) < min_rows:
-            continue
-        rows.append({
-            'hydro_year': hy,
-            'nse': calc_nse(g['Q_raw'].values, g['Q_pred'].values),
-            'kge': calc_kge(g['Q_raw'].values, g['Q_pred'].values),
-            'acc': calc_acc(g['Q_raw'].values, g['Q_pred'].values,
-                            g['Q_clim'].values),
-        })
-    return pd.DataFrame(rows) if rows else None
+# ═══════════════════════════════════════════════════════════════════════
+# DATA
+# ═══════════════════════════════════════════════════════════════════════
 
-
-@lru_cache(maxsize=None)
-def window_crps(catchment: str, model: str, lo: int, hi: int, min_rows=30):
-    """
-    Per-fold CRPS restricted to lead_day in [lo, hi], indexed by hydro_year.
-
-    Deterministic baselines have no member frame; their members are identical
-    so CRPS reduces exactly to MAE, taken from the ensemble-mean file. An
-    ensemble model with no member frame returns None rather than falling back
-    to MAE, which would not be its CRPS.
-    """
-    if model in DETERMINISTIC_MODELS:
-        df = pl.load_predictions(catchment, model)
-        if df is None:
-            return None
-        sub = (df[(df['lead_day'] >= lo) & (df['lead_day'] <= hi)]
-                 .dropna(subset=['Q_raw', 'Q_pred']))
-        rows = {}
-        for hy, g in sub.groupby('hydro_year'):
-            if len(g) < min_rows:
-                continue
-            rows[hy] = float(np.abs(g['Q_raw'] - g['Q_pred']).mean())
-        return pd.Series(rows, dtype=float) if rows else None
-
-    dfm = pl.load_member_predictions(catchment, model)
-    if dfm is None:
-        return None
-    sub = (dfm[(dfm['lead_day'] >= lo) & (dfm['lead_day'] <= hi)]
-             .dropna(subset=['Q_raw', 'Q_pred']))
-    rows = {}
-    for hy, g in sub.groupby('hydro_year'):
-        # min_rows counts timesteps, not member-rows, to stay comparable with
-        # the same guard applied to the ensemble-mean metrics.
-        if g[['init_date', 'date']].drop_duplicates().shape[0] < min_rows:
-            continue
-        rows[hy] = crps_from_pred_df(g)
-    return pd.Series(rows, dtype=float) if rows else None
-
-
-@lru_cache(maxsize=None)
-def window_crpss(catchment: str, lo: int, hi: int, min_rows=30) -> dict:
-    """
-    Per-fold CRPSS against climatology, as {model: Series indexed by
-    hydro_year}. Folds where the reference CRPS is zero or non-finite are
-    dropped, and the reference model itself is omitted (it is identically 0).
-    """
-    ref = window_crps(catchment, CRPSS_REFERENCE, lo, hi, min_rows)
-    if ref is None:
-        return {}
-    ref = ref[np.isfinite(ref) & (ref > 0)]
-    if len(ref) == 0:
-        return {}
-
+def load_year_scores(catchment: str, variant: str, resolution: str,
+                     lead_month: int) -> dict:
+    """{model: per-year scores (hydro_year, nse, kge, acc, crpss)} at one
+    (resolution, lead month), for every model of MODEL_ORDER with scores.
+    Climatology's CRPSS (identically 0) is left out."""
     out = {}
-    for model in pl.MODEL_ORDER:
-        if model == CRPSS_REFERENCE:
+    for m in pl.MODEL_ORDER:
+        y = pl.load_yearly(catchment, m, variant, resolution)
+        if y is None:
             continue
-        crps = window_crps(catchment, model, lo, hi, min_rows)
-        if crps is None:
+        y = y[y["lead_month"] == lead_month]
+        if y.empty:
             continue
-        common = crps.index.intersection(ref.index)
-        if len(common) == 0:
-            continue
-        out[model] = 1.0 - crps.loc[common] / ref.loc[common]
+        y = y[["hydro_year"] + [k["key"] for k in METRICS]].copy()
+        if m == CRPSS_REFERENCE:
+            y["crpss"] = np.nan
+        out[m] = y.reset_index(drop=True)
     return out
 
 
-@lru_cache(maxsize=None)
-def _climatology_period_obs(catchment: str) -> pd.Series:
-    """Observed discharge over the years the climatology is fitted on:
-    hydro years from clim_start_year onward, skip_years excluded."""
-    # Imported here, not at module level: the plotting modules otherwise
-    # receive their configuration from the calling driver.
-    from ..catchments import CATCHMENTS, SHARED
-    from ..climatology import eligible_hydro_years
-    from ..data import load_obs_discharge, hydro_year_of
-    cfg = CATCHMENTS[catchment]
-    obs = load_obs_discharge(cfg['discharge_csv'])
-    years = eligible_hydro_years(obs, cfg['skip_years'],
-                                 start_year=SHARED['clim_start_year'])
-    return obs[np.isin(hydro_year_of(obs.index), list(years))]
-
-
-@lru_cache(maxsize=None)
-def doy_reference_acc(catchment: str, lo: int, hi: int, min_rows=30):
-    """
-    Per-fold ACC of the day-of-year reference, restricted to lead_day in
-    [lo, hi], indexed by hydro_year.
-
-    For each fold the forecast on every date is the mean of log1p(Q) on that
-    day of year over the fold's training hydro years, left unsmoothed, and
-    back-transformed with expm1 so calc_acc sees it exactly as it sees every
-    other forecast. Because the climatology is smoothed over 31 days, it
-    flattens short features of the seasonal cycle such as a sharp freshet;
-    this forecast resolves them, and so earns a positive ACC without any
-    information about the year being forecast. It is the analytic limit of a
-    model trained on day-of-year features alone.
-
-    Forecast and observed anomalies share one reference: the forecast is built
-    from exactly the fold's training years (read from the scaffold run's
-    folds.csv, common.load_folds), the same years the fold's climatology was
-    fit on, and is scored against that fold climatology (the scaffold's
-    Q_clim). A reference that included the test year would correlate the
-    forecast anomaly negatively with the observed one (Barnston & van den
-    Dool 1993) and bias this ACC low.
-    """
-    scaffold = pl.load_predictions(catchment, DOY_REF_SCAFFOLD)
-    if scaffold is None:
+def doy_reference_median(catchment: str, variant: str, resolution: str,
+                         lead_month: int):
+    """Median per-year ACC of the day-of-year reference, or None (not shown
+    at this resolution, or no scores)."""
+    if resolution not in pl.DOY_REF_RESOLUTIONS:
         return None
-    train_years = pl.load_folds(catchment, DOY_REF_SCAFFOLD)
-    if train_years is None:
-        print(f"  {catchment}: no folds.csv in the {DOY_REF_SCAFFOLD} default "
-              f"run -- day-of-year reference skipped (rerun that run)")
+    y = pl.load_yearly(catchment, pl.DOY_REFERENCE, variant, resolution)
+    if y is None:
         return None
-    from ..data import hydro_year_of
-    obs = _climatology_period_obs(catchment)
-    obs_hy = hydro_year_of(obs.index)
-
-    sub = (scaffold[(scaffold['lead_day'] >= lo) & (scaffold['lead_day'] <= hi)]
-             .dropna(subset=['Q_raw', 'Q_clim']))
-    rows = {}
-    for hy, g in sub.groupby('hydro_year'):
-        if len(g) < min_rows or int(hy) not in train_years:
-            continue
-        train = obs[np.isin(obs_hy, list(train_years[int(hy)]))]
-        doy_mean = (np.log1p(train).groupby(train.index.dayofyear).mean()
-                      .reindex(range(1, 367)).ffill().bfill())
-        q_pred = np.expm1(g['date'].dt.dayofyear.map(doy_mean).values)
-        rows[hy] = calc_acc(g['Q_raw'].values, q_pred, g['Q_clim'].values)
-    return pd.Series(rows, dtype=float) if rows else None
-
-
-def load_window_fold_metrics(catchment: str, lo: int, hi: int) -> dict:
-    """fold_metrics_in_window for every model in MODEL_ORDER available for
-    this catchment, with per-fold CRPSS joined on. Missing models are simply
-    absent from the dict; a model without CRPSS simply lacks that column."""
-    crpss = window_crpss(catchment, lo, hi)
-    out = {}
-    for model in pl.MODEL_ORDER:
-        df = fold_metrics_in_window(catchment, model, lo, hi)
-        if df is None or len(df) == 0:
-            continue
-        s = crpss.get(model)
-        if s is not None and len(s) > 0:
-            df = df.merge(
-                s.rename('crpss').rename_axis('hydro_year').reset_index(),
-                on='hydro_year', how='left')
-        out[model] = df
-    return out
+    acc = y.loc[y["lead_month"] == lead_month, "acc"].dropna()
+    return float(acc.median()) if len(acc) else None
 
 
 def _sig_vs_reference(catchments: list, fold_data: dict) -> dict:
@@ -280,10 +127,33 @@ def _sig_vs_reference(catchments: list, fold_data: dict) -> dict:
     return out
 
 
+def box_table(catchments: list, fold_data: dict, sig: dict) -> pd.DataFrame:
+    """The box statistics as drawn: one row per (catchment, metric, model)."""
+    rows = []
+    for c in catchments:
+        for m, df_m in fold_data[c].items():
+            for k in METRICS:
+                v = df_m[k["key"]].dropna()
+                if v.empty:
+                    continue
+                rows.append({"catchment": c, "metric": k["key"], "model": m,
+                             "n_years": len(v), "median": v.median(),
+                             "q25": v.quantile(0.25), "q75": v.quantile(0.75),
+                             "min": v.min(), "max": v.max(),
+                             "n_below_floor": int((v < Y_LIM[0]).sum()),
+                             "sig_vs_damped_persistence":
+                                 sig.get((c, k["key"], m), np.nan)})
+    return pd.DataFrame(rows)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# FIGURE
+# ═══════════════════════════════════════════════════════════════════════
+
 def draw_below_floor_counts(ax, xs, data):
     """
     Values below the hardcoded Y_LIM floor are clipped off-axis; mark each
-    affected box with its off-axis count instead of letting a single bad fold
+    affected box with its off-axis count instead of letting a single bad year
     (e.g. a low-flow year on an ephemeral river) blow out the shared axis.
     """
     y_annot = Y_LIM[0] + (Y_LIM[1] - Y_LIM[0]) * ANNOT_OFFSET_FRAC
@@ -297,10 +167,22 @@ def draw_below_floor_counts(ax, xs, data):
                     fontsize=pl.FONT_ANNOT - 1, color='#666666', zorder=4)
 
 
+def draw_year_dots(ax, xs, data, seed=0):
+    """Every year as a small dot over its box (horizontal jitter, fixed
+    seed), within the axis range."""
+    rng = np.random.default_rng(seed)
+    for x, vals in zip(xs, data):
+        v = np.asarray(vals)
+        v = v[v >= Y_LIM[0]]
+        ax.scatter(x + rng.uniform(-DOT_JITTER, DOT_JITTER, len(v)), v,
+                   s=DOT_SIZE, color='#222222', linewidths=0, zorder=4.5)
+
+
 def plot_bar_chart(catchments: list, fold_data: dict, title: str, out_name: str,
-                   doy_ref: dict = None):
+                   doy_ref: dict = None, show_years: bool = False):
     """doy_ref maps catchment -> median day-of-year reference ACC, drawn as a
-    dashed line in the ACC column; catchments without an entry get no line."""
+    dashed line in the ACC column; catchments without an entry get no line.
+    show_years draws every year as a dot over its box."""
     pl.apply_plot_style()
     doy_ref = doy_ref or {}
     sig = _sig_vs_reference(catchments, fold_data)
@@ -313,37 +195,27 @@ def plot_bar_chart(catchments: list, fold_data: dict, title: str, out_name: str,
 
     for row, catchment in enumerate(catchments):
         models_here = fold_data[catchment]
-        letter  = pl.catchment_letter(row)
-        display = pl.catchment_display(catchment)
-
         present_models = [m for m in pl.MODEL_ORDER if m in models_here]
 
         for col, metric in enumerate(METRICS):
             ax  = axes[row, col]
             key = metric["key"]
 
-            box_data  = []
             box_years = {}
             for m in present_models:
-                df_m = models_here[m]
-                if key not in df_m.columns:
-                    continue
-                vals = df_m[key].dropna()
-                if len(vals) == 0:
-                    continue
-                box_data.append(vals.values)
-                box_years[m] = (vals.values,
-                                df_m.loc[vals.index, 'hydro_year'].values)
+                vals = models_here[m][key].dropna()
+                if len(vals):
+                    box_years[m] = vals.values
 
             x_all = np.arange(len(present_models))
             plotted_models = [m for m in present_models if m in box_years]
             x_plotted = [present_models.index(m) for m in plotted_models]
-            data_plotted = [box_years[m][0] for m in plotted_models]
+            data_plotted = [box_years[m] for m in plotted_models]
 
             if data_plotted:
                 bp = ax.boxplot(
                     data_plotted, positions=x_plotted, widths=BOX_WIDTH,
-                    patch_artist=True, showfliers=True,
+                    patch_artist=True, showfliers=not show_years,
                     medianprops=dict(color='#222222', linewidth=0.9),
                     flierprops=dict(marker='o', markersize=1.5,
                                     markerfacecolor='#888888',
@@ -357,6 +229,8 @@ def plot_bar_chart(catchments: list, fold_data: dict, title: str, out_name: str,
                     patch.set_facecolor(pl.MODEL_COLORS[m])
                     patch.set_alpha(BOX_ALPHA)
                     patch.set_edgecolor('#333333')
+                if show_years:
+                    draw_year_dots(ax, x_plotted, data_plotted, seed=row * 10 + col)
 
             ax.set_ylim(*Y_LIM)
             ax.axhline(0.0, color='#444444', lw=0.6, alpha=0.6, zorder=2)
@@ -375,8 +249,10 @@ def plot_bar_chart(catchments: list, fold_data: dict, title: str, out_name: str,
             if col == 0:
                 # Letter prefixed into the row label rather than floated above
                 # the panel, where it would collide with the metric titles.
-                ax.set_ylabel(f"{letter})  {display}", fontweight='bold',
-                             fontsize=pl.FONT_AXIS_LABEL, labelpad=3)
+                ax.set_ylabel(pl.catchment_row_label(row, catchment,
+                                                     max_chars=24),
+                              fontweight='bold', fontsize=pl.FONT_AXIS_LABEL,
+                              labelpad=3, linespacing=0.95)
             else:
                 ax.set_ylabel("")
                 ax.tick_params(axis='y', labelleft=False)
@@ -395,6 +271,10 @@ def plot_bar_chart(catchments: list, fold_data: dict, title: str, out_name: str,
     if any(c in doy_ref for c in catchments):
         legend_handles.append(mlines.Line2D([], [], color=DOY_REF_COLOR, lw=0.9,
                                             ls='--', label=DOY_REF_LABEL))
+    if show_years:
+        legend_handles.append(mlines.Line2D([], [], ls='none', marker='o',
+                                            markersize=2, color='#222222',
+                                            label='One test year'))
     legend_handles += pl.sig_legend_handles()
     fig.legend(handles=legend_handles, loc='lower center',
               ncol=3, fontsize=pl.FONT_LEGEND,
@@ -415,27 +295,40 @@ def plot_bar_chart(catchments: list, fold_data: dict, title: str, out_name: str,
 
     pl.savefig(fig, f"{pl.PLOT_DIR}/{out_name}")
     plt.close()
+    return sig
 
 
-def run(catchments: list, lo: int, hi: int, title: str, out_name: str):
-    """Build the boxplot comparison figure for the given catchments, using
-    only lead_day in [lo, hi]."""
+def run(catchments: list, variant: str = "default", resolution: str = "daily",
+        lead_month: int = 1, out_name: str = None, show_years: bool = None):
+    """
+    Build the per-year boxplot figure for the given catchments at one
+    (resolution, lead month). show_years defaults to True under the split
+    design (few test years), False otherwise. Writes <out_name>.pdf and
+    <out_name>.csv (the box statistics).
+    """
+    out_name = out_name or f"02_boxplots_{resolution}_lm{lead_month}"
+    if show_years is None:
+        show_years = pl.DESIGN == "split"
     catchments = pl.order_catchments(catchments)
-    fold_data = {}
-    doy_ref = {}
+    fold_data, doy_ref = {}, {}
     for catchment in catchments:
-        models_here = load_window_fold_metrics(catchment, lo, hi)
+        models_here = load_year_scores(catchment, variant, resolution,
+                                       lead_month)
         if models_here:
             fold_data[catchment] = models_here
-        acc_doy = doy_reference_acc(catchment, lo, hi)
-        if acc_doy is not None and acc_doy.notna().any():
-            doy_ref[catchment] = float(acc_doy.median())
-            print(f"  {catchment}: day-of-year reference median ACC "
-                  f"{doy_ref[catchment]:+.3f} ({acc_doy.notna().sum()} folds)")
+        med = doy_reference_median(catchment, variant, resolution, lead_month)
+        if med is not None:
+            doy_ref[catchment] = med
+            print(f"  {catchment}: day-of-year reference median ACC {med:+.3f}")
 
     box_catchments = [c for c in catchments if c in fold_data]
-    if box_catchments:
-        plot_bar_chart(box_catchments, fold_data, title, out_name,
-                       doy_ref=doy_ref)
-    else:
-        print(f"  Skipping boxplot figure {out_name} (no predictions found)")
+    if not box_catchments:
+        print(f"  Skipping boxplot figure {out_name} (no {variant} scores found)")
+        return
+    title = (f"{pl.design_label()} per-year skill, "
+             f"{pl.RESOLUTION_LABELS[resolution].lower()}, lead month "
+             f"{lead_month}")
+    sig = plot_bar_chart(box_catchments, fold_data, title, out_name,
+                         doy_ref=doy_ref, show_years=show_years)
+    box_table(box_catchments, fold_data, sig).to_csv(
+        f"{pl.PLOT_DIR}/{out_name}.csv", index=False)
