@@ -1,7 +1,7 @@
 """
 seas5ml.paths – Input and output locations for the whole pipeline.
 
-Input locations (discharge CSVs, SEAS5 NetCDF) are read from the [paths]
+Input locations (discharge CSVs, SEAS5 NetCDF, catchment polygons) are read from the [paths]
 section of config.toml at the repository root; relative entries there are
 resolved against the repository root. Output locations are fixed, all under
 data/ (gitignored; each subfolder may be a symbolic link to project storage).
@@ -11,6 +11,7 @@ Every output path is built here and nowhere else:
     data/processed_data/
         <catchment>_features.parquet        stage 0 feature table
         <catchment>_folds_<design>.txt      stage 0 fold manifest (fold ids)
+        <catchment>_forcing_cells.csv       stage 0 grid cells and weights of the forcing mean
     data/results/<design>/                  one tree per evaluation design
         default/<catchment>/<model>/        stage 1, default configs (all folds)
         tuned/<catchment>/<model>/fold_<id>/  stage 1, nested-CV tuning (one fold)
@@ -36,6 +37,7 @@ with open(CONFIG_FILE, "rb") as _fh:
 # ── Inputs (config.toml) ─────────────────────────────────────────────────
 DISCHARGE_DIR = REPO_ROOT / CONFIG["paths"]["discharge_dir"]
 SEAS5_DIR     = REPO_ROOT / CONFIG["paths"]["seas5_dir"]
+POLYGON_DIR   = REPO_ROOT / CONFIG["paths"]["polygon_dir"]
 
 # ── Outputs (repo-relative) ──────────────────────────────────────────────
 DATA_DIR      = REPO_ROOT / "data"
@@ -51,6 +53,13 @@ RUN_KINDS = ("default", "tuned", "sensitivity")
 def features_path(catchment: str) -> Path:
     """Stage 0 feature table of one catchment."""
     return PROCESSED_DIR / f"{catchment}_features.parquet"
+
+
+def forcing_cells_path(catchment: str) -> Path:
+    """Stage 0 record of the grid cells averaged into one catchment's forcing:
+    one row per cell of the box (lat, lon, overlap with the catchment polygon
+    in km², weight)."""
+    return PROCESSED_DIR / f"{catchment}_forcing_cells.csv"
 
 
 def fold_manifest_path(design: str, catchment: str) -> Path:

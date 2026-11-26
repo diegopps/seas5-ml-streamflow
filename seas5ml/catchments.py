@@ -3,14 +3,24 @@ seas5ml.catchments – Catchment definitions for seasonal discharge prediction.
 
 Add new catchments here. The pipeline scripts all read from this file.
 Data locations come from config.toml (see seas5ml/paths.py).
+
+Forcing cells: `catch_lat` / `catch_lon` bound the SEAS5 grid cells that are
+candidates for a catchment's forcing (a box with whole-degree bounds is
+exactly a set of 1 degree cells, since the SEAS5 grid is centred on half
+degrees); `polygon` is the catchment's watershed polygon (GRDC, GeoJSON). Stage 0
+weights each cell of the box by its area of overlap with the polygon
+(seas5ml.spatial), so cells the catchment does not touch get weight 0, and
+stops if the box does not contain the whole polygon. The cells and weights
+used are written to data/processed_data/<catchment>_forcing_cells.csv.
 """
 
-from .paths import DISCHARGE_DIR, SEAS5_DIR
+from .paths import DISCHARGE_DIR, POLYGON_DIR, SEAS5_DIR
 
 CATCHMENTS = {
     'ulkenboken': {
         'name': 'Ulken Boken',
         'discharge_csv': str(DISCHARGE_DIR / 'Ulkenboken_1995-2025_Q.csv'),
+        'polygon': str(POLYGON_DIR / 'ulkenboken.geojson'),
         # Catchment-scale bounding box (Bol'shoy Bukon' / Ulken Boken, draining to
         # the Buktyrma reservoir in the Kazakh Altai; catchment polygon of
         # GRDC station 2311527 "ZHUMBA", lon [82.5921, 83.0362],
@@ -38,6 +48,7 @@ CATCHMENTS = {
     'zeravshan': {
         'name': 'Zeravshan',
         'discharge_csv': str(DISCHARGE_DIR / 'Zeravshan_1936-2025_Q.csv'),
+        'polygon': str(POLYGON_DIR / 'zeravshan.geojson'),
         # Catchment-scale bounding box (Zeravshan basin, Tajikistan/Uzbekistan).
         # Trimmed from lon (66, 72) to (67, 71): the SEAS5 grid is centred on
         # half-integers, so the old box selected 3 lat x 6 lon cells
@@ -55,6 +66,7 @@ CATCHMENTS = {
     'esil': {
         'name': 'Esil',
         'discharge_csv': str(DISCHARGE_DIR / 'Esil_1995-2025_Q.csv'),
+        'polygon': str(POLYGON_DIR / 'esil-turgel.geojson'),
         # Catchment-scale bounding box (Ishim river, Kazakh steppe; catchment
         # polygon of GRDC station 2311302 "TURGENEVKA",
         # lon [72.0779, 73.2721], lat [50.4021, 50.9304], rounded outward)
@@ -65,6 +77,7 @@ CATCHMENTS = {
     'ayat': {
         'name': 'Ayat',
         'discharge_csv': str(DISCHARGE_DIR / 'Ayat_1995-2025_Q.csv'),
+        'polygon': str(POLYGON_DIR / 'ayat.geojson'),
         # Catchment-scale bounding box (Ayat river, Kazakh/Russian steppe;
         # catchment polygon of GRDC station 2911230 "VARVARINKA",
         # lon [59.8657, 62.3852], lat [52.4489, 53.5261], rounded outward)
@@ -75,6 +88,7 @@ CATCHMENTS = {
     'kalkutan': {
         'name': 'Kalkutan',
         'discharge_csv': str(DISCHARGE_DIR / 'Kalkutan_1995-2025_Q.csv'),
+        'polygon': str(POLYGON_DIR / 'kalkutan.geojson'),
         # Catchment-scale bounding box (Koluton river, Akmola steppe; catchment
         # polygon of GRDC station 2311360 "QALAOTAN",
         # lon [69.0398, 71.4802], lat [51.4413, 52.8918], rounded outward)
@@ -85,6 +99,7 @@ CATCHMENTS = {
     'kurshim': {
         'name': 'Kurshim',
         'discharge_csv': str(DISCHARGE_DIR / 'Kurshim_1995-2025_Q.csv'),
+        'polygon': str(POLYGON_DIR / 'kurshim.geojson'),
         # Catchment-scale bounding box (Kurshim river, Kazakh Altai; catchment
         # polygon of GRDC station 2311840 "VOZNESENSKOJE",
         # lon [83.8404, 85.8270], lat [48.4936, 49.0934]. Tightest integer box
@@ -97,6 +112,7 @@ CATCHMENTS = {
     'zhabay': {
         'name': 'Zhabay',
         'discharge_csv': str(DISCHARGE_DIR / 'Zhabay_1995-2025_Q.csv'),
+        'polygon': str(POLYGON_DIR / 'zhabay.geojson'),
         # Catchment-scale bounding box (Zhabay river, Akmola steppe; catchment
         # polygon of GRDC station 2311330 "ATBASAR",
         # lon [67.6998, 69.3174], lat [51.8080, 52.8496], rounded outward)
@@ -107,6 +123,7 @@ CATCHMENTS = {
     'kirchbichl': {
         'name': 'Kirchbichl-Bichlwang',
         'discharge_csv': str(DISCHARGE_DIR / 'kirchbichl_bichlwang_1951-2023_Q.csv'),
+        'polygon': str(POLYGON_DIR / 'kirchbichl.geojson'),
         # Catchment-scale bounding box (Inn basin, Austria; catchment polygon,
         # lon [9.6638, 12.3129], lat [46.3354, 47.6763], rounded outward to integers)
         'catch_lat': (46.0, 48.0),
@@ -119,6 +136,7 @@ CATCHMENTS = {
     'diepoldsau': {
         'name': 'Diepoldsau-Rietbrücke',
         'discharge_csv': str(DISCHARGE_DIR / 'diepoldsau_1919-2020_Q.csv'),
+        'polygon': str(POLYGON_DIR / 'diepoldsau.geojson'),
         # Catchment-scale bounding box (Rhine basin, Switzerland/Austria;
         # catchment polygon, lon [8.6521, 10.2221], lat [46.3663, 47.3854],
         # rounded outward to integers)

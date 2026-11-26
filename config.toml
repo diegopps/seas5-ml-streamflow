@@ -4,6 +4,7 @@
 [paths]
 discharge_dir = "data/indata/discharge_obs"   # one CSV per catchment: date, Q (m³/s)
 seas5_dir     = "data/indata/ecmwf"           # grib/, netcdf_hindcast/, netcdf_forecast/
+polygon_dir   = "data/catchments"             # one GeoJSON per catchment: watershed polygon (GRDC), WGS84
 
 [seas5_download]
 region     = "centralasia"             # "centralasia" or "europe"

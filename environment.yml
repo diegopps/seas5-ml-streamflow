@@ -22,6 +22,9 @@ dependencies:
   - pytorch=2.10.0
   - matplotlib=3.10.8
   - joblib=1.5.3
+  # catchment polygons and forcing-cell weights (seas5ml.spatial)
+  - shapely=2.1.2
+  - pyproj=3.7.2
   # SEAS5 download and GRIB -> NetCDF conversion (pipeline/0_data/seas5_download/);
   # eccodes and cdo also provide the grib_copy and cdo command-line tools
   - cdsapi=0.7.7

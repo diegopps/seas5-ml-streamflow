@@ -9,6 +9,21 @@ Output: {nc_dir}/forecast_{YEAR}_{MM}_daily_member{NN}.nc
 
 Filter: only messages where dataDate month == validityDate month == target month
         (i.e. data initialised in month M that is also valid in month M).
+
+Day alignment (checked, see check_daily_alignment / check_merged):
+    On the CDS only 2m_temperature is 6-hourly (steps 6 ... 5160 h); every
+    other variable (tp, sf, ssrd, mx2t24, mn2t24, sd) comes at 24-h steps
+    only (24 ... 5160 h, i.e. 00 UTC of the next day). `cdo daymean` gives
+    2m_temperature 216 days (start date ... start + 215 d, the last holding
+    only the 00 UTC step) and the 24-h variables 215 days (start + 1 d ...
+    start + 215 d). `cdo merge` takes the time axis from the FIRST input
+    (2m_temperature, first in VARIABLES), keeps 215 steps and pairs the
+    other variables by step index, so the day labelled D carries their value
+    at 00 UTC of D+1: running totals through the end of UTC day D (deaccumulated
+    in preprocess.py), the extremes over UTC day D, the snow depth at the end
+    of day D. This is correct, but implicit: reordering VARIABLES or a change
+    in what the CDS delivers would shift the 24-h variables by a day without
+    any error, so every conversion checks these facts and stops if one fails.
 """
 import argparse
 import os
@@ -19,7 +34,9 @@ import eccodes
 import sys
 import netCDF4 as nc4
 
-from seas5_settings import REGION, YEARS, MONTHS, n_members, nc_subdir, SEAS5_DIR
+from datetime import date, timedelta
+
+from seas5_settings import REGION, YEARS, MONTHS, LEADTIMES, n_members, nc_subdir, SEAS5_DIR
 
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -45,6 +62,16 @@ VARIABLES = [
     "snow_depth",
     "snowfall",
 ]
+
+# 2m_temperature must stay first: cdo merge takes the time axis from the first
+# input (see "Day alignment" in the module docstring).
+TIME_AXIS_VAR = "2m_temperature"
+if VARIABLES[0] != TIME_AXIS_VAR:
+    raise RuntimeError(f"VARIABLES must start with {TIME_AXIS_VAR!r} (cdo merge takes "
+                       f"its time axis from the first input); got {VARIABLES[0]!r}")
+
+# Days in a merged file: the last lead (5160 h) is 215 days after the start.
+N_DAYS = LEADTIMES[-1] // 24
 
 VARIABLE_MAPPING = {
     "2m_temperature":                              {"short_name": "tas",    "long_name": "Mean 2m Temperature",              "units": "K",                     "grib_code": 167},
@@ -155,6 +182,56 @@ def rename_variables(nc_file: str) -> None:
                 ds[info["short_name"]].units      = info["units"]
 
 
+class AlignmentError(RuntimeError):
+    """The daily files do not line up as the merge assumes ("Day alignment"
+    in the module docstring). Stops the task: nothing is written for it."""
+
+
+def _nc_dates(nc_file: str) -> list:
+    """Calendar dates of a NetCDF file's time steps."""
+    with nc4.Dataset(nc_file) as ds:
+        t = ds["time"]
+        times = nc4.num2date(t[:], t.units, getattr(t, "calendar", "standard"))
+    return [date(x.year, x.month, x.day) for x in times]
+
+
+def check_daily_alignment(var_files: list, init: date) -> None:
+    """
+    Before the merge: `var_files` = [(variable, daily NetCDF), ...] in merge
+    order. The first must be 2m_temperature, starting on the start date with
+    N_DAYS + 1 days; every other variable must start one day later with
+    N_DAYS days and end on the same date. Raises AlignmentError otherwise.
+    """
+    first_var, first_file = var_files[0]
+    if first_var != TIME_AXIS_VAR:
+        raise AlignmentError(f"merge order starts with {first_var!r}, not {TIME_AXIS_VAR!r}")
+    t_dates = _nc_dates(first_file)
+    if t_dates[0] != init or len(t_dates) != N_DAYS + 1:
+        raise AlignmentError(
+            f"{first_var}: {len(t_dates)} days from {t_dates[0]}, expected "
+            f"{N_DAYS + 1} days from {init} (6-hourly steps 6 ... {LEADTIMES[-1]} h)")
+    for var, path in var_files[1:]:
+        d = _nc_dates(path)
+        if d[0] != init + timedelta(days=1) or len(d) != N_DAYS or d[-1] != t_dates[-1]:
+            raise AlignmentError(
+                f"{var}: {len(d)} days {d[0]} ... {d[-1]}, expected {N_DAYS} days "
+                f"{init + timedelta(days=1)} ... {t_dates[-1]} (24-h steps only); "
+                f"the merge would pair it with the wrong days")
+
+
+def check_merged(nc_file: str, init: date) -> None:
+    """After the merge: N_DAYS days from the start date and every variable."""
+    d = _nc_dates(nc_file)
+    if d[0] != init or len(d) != N_DAYS:
+        raise AlignmentError(f"{os.path.basename(nc_file)}: {len(d)} days from {d[0]}, "
+                             f"expected {N_DAYS} from {init}")
+    with nc4.Dataset(nc_file) as ds:
+        missing = [VARIABLE_MAPPING[v]["short_name"] for v in VARIABLES
+                   if VARIABLE_MAPPING[v]["short_name"] not in ds.variables]
+    if missing:
+        raise AlignmentError(f"{os.path.basename(nc_file)}: variables missing after merge: {missing}")
+
+
 def _remove(path: str) -> None:
     try:
         os.remove(path)
@@ -167,6 +244,7 @@ def process_year_month(year: str, month: str) -> None:
     # Hindcast (25 members) vs operational forecast (51) — resolved per year.
     n_mem  = n_members(year)
     nc_dir = nc_dir_for(year)
+    init   = date(int(year), int(month), 1)
     log.info(f"\n> {year}-{month}  [{nc_subdir(year)}, {n_mem} members]")
 
     # ── Skip if all outputs already exist ─────────────────────────────────
@@ -204,8 +282,8 @@ def process_year_month(year: str, month: str) -> None:
     # ── Step 2a: INDIVIDUAL MEMBERS ───────────────────────────────────────
     if SAVE_INDIVIDUAL_MEMBERS:
         os.makedirs(nc_dir, exist_ok=True)
-        # per_member_nc[member_idx] = [var1.nc, var2.nc, ...]
-        per_member_nc: dict[int, list[str]] = {m: [] for m in range(n_mem)}
+        # per_member_nc[member_idx] = [(var1, var1.nc), (var2, var2.nc), ...], in VARIABLES order
+        per_member_nc: dict[int, list[tuple[str, str]]] = {m: [] for m in range(n_mem)}
 
         for var, month_grib in month_gribs.items():
             for member_idx in range(n_mem):
@@ -215,7 +293,7 @@ def process_year_month(year: str, month: str) -> None:
                 try:
                     split_member_grib(month_grib, member_grib, member_idx)
                     grib_to_netcdf_daily(member_grib, member_nc)
-                    per_member_nc[member_idx].append(member_nc)
+                    per_member_nc[member_idx].append((var, member_nc))
                 except subprocess.CalledProcessError as e:
                     log.error(f"    member {member_str} / {var}: {e.stderr.decode().strip()}")
                 finally:
@@ -224,38 +302,60 @@ def process_year_month(year: str, month: str) -> None:
         log.info("  Merging variables per member...")
         for member_idx in range(n_mem):
             member_str = f"{member_idx:02d}"
-            var_ncs    = per_member_nc[member_idx]
+            pairs      = per_member_nc[member_idx]
+            var_ncs    = [f for _, f in pairs]
             if len(var_ncs) != len(VARIABLES):
                 log.warning(f"  member {member_str}: {len(var_ncs)}/{len(VARIABLES)} variables — skipping")
                 for f in var_ncs:
                     _remove(f)
                 continue
             out_nc = os.path.join(nc_dir, f"forecast_{year}_{month}_daily_member{member_str}.nc")
-            if merge_variables(var_ncs, out_nc):
-                rename_variables(out_nc)
-                log.info(f"    ✓ {os.path.basename(out_nc)}")
-            for f in var_ncs:
-                _remove(f)
+            try:
+                check_daily_alignment(pairs, init)
+                if merge_variables(var_ncs, out_nc):
+                    rename_variables(out_nc)
+                    check_merged(out_nc, init)
+                    log.info(f"    ✓ {os.path.basename(out_nc)}")
+            except AlignmentError as e:
+                _remove(out_nc)
+                for _, other in per_member_nc.items():
+                    for _, f in other:
+                        _remove(f)
+                log.error(f"  {year}-{month} member {member_str}: {e}")
+                raise
+            finally:
+                for f in var_ncs:
+                    _remove(f)
 
     # ── Step 2b: ENSEMBLE MEAN ────────────────────────────────────────────
     else:
         os.makedirs(nc_dir, exist_ok=True)
-        var_ncs: list[str] = []
+        pairs: list[tuple[str, str]] = []
         for var, month_grib in month_gribs.items():
             var_nc = os.path.join(TEMP_DIR, f"{var}_{year}_{month}_ensmean.nc")
             try:
                 grib_to_netcdf_ensmean(month_grib, var_nc)
-                var_ncs.append(var_nc)
+                pairs.append((var, var_nc))
             except subprocess.CalledProcessError as e:
                 log.error(f"    ensmean / {var}: {e.stderr.decode().strip()}")
+        var_ncs = [f for _, f in pairs]
 
-        if len(var_ncs) == len(VARIABLES):
-            out_nc = os.path.join(nc_dir, f"forecast_{year}_{month}_daily_ensmean.nc")
-            if merge_variables(var_ncs, out_nc):
-                rename_variables(out_nc)
-                log.info(f"  ✓ {os.path.basename(out_nc)}")
-        for f in var_ncs:
-            _remove(f)
+        try:
+            if len(var_ncs) == len(VARIABLES):
+                out_nc = os.path.join(nc_dir, f"forecast_{year}_{month}_daily_ensmean.nc")
+                try:
+                    check_daily_alignment(pairs, init)
+                    if merge_variables(var_ncs, out_nc):
+                        rename_variables(out_nc)
+                        check_merged(out_nc, init)
+                        log.info(f"  ✓ {os.path.basename(out_nc)}")
+                except AlignmentError as e:
+                    _remove(out_nc)
+                    log.error(f"  {year}-{month} ensmean: {e}")
+                    raise
+        finally:
+            for f in var_ncs:
+                _remove(f)
 
 
 

@@ -21,7 +21,7 @@ Schema (one row per date × init_date × member):
     date, init_date, member, lead_day, source,
     hydro_year, init_month,
     logq0,                                     ← observed log1p(Q) at init_date
-    tas, tasmax, tasmin, ssrd, tp, sd, sf,   ← catchment-averaged met vars
+    tas, tasmax, tasmin, ssrd, tp, sd, sf,   ← catchment-mean met vars (see Forcing cells)
     sin_doy, cos_doy,                         ← seasonal cycle
     Q                                         ← observed discharge (target, NaN for future dates)
 
@@ -45,6 +45,21 @@ Units:
 CDS archives tp/ssrd/sf as running totals accumulated from forecast step 0.
 This script differences them along the lead-day axis (see ACCUM_VARS below)
 so the feature table holds true per-day values, same as the other variables.
+
+Forcing cells:
+    Each field is reduced to one series per catchment as the mean over the
+    SEAS5 cells of the catchment's box (catch_lat / catch_lon), each cell
+    weighted by its area of overlap with the catchment polygon
+    (seas5ml.spatial.cell_weights; cells outside the catchment get weight 0).
+    The cells and weights are written to
+    data/processed_data/<catchment>_forcing_cells.csv.
+
+Grid guard:
+    Hindcast and operational files must be on the same grid, and every file
+    must give exactly the box cells the weights were computed on; any
+    mismatch stops the run (GridMismatchError). Both eras must be present.
+    (The Central Asia operational files were once on a grid offset by half a
+    degree, which silently widened their boxes; see TODO.md, SEAS5 FORCING.)
 """
 
 import os
@@ -64,7 +79,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root, for s
 from seas5ml import designs
 from seas5ml.catchments import CATCHMENTS, SHARED
 from seas5ml.data import build_analysis_frame, hydro_year_of
-from seas5ml.paths import PROCESSED_DIR, features_path, fold_manifest_path
+from seas5ml.paths import PROCESSED_DIR, features_path, fold_manifest_path, forcing_cells_path
+from seas5ml.spatial import cell_weights, load_polygon
 
 # ═══════════════════════════════════════════════════════════════════════
 # VARIABLE MAPPING
@@ -136,6 +152,12 @@ CATCH_LON_MIN, CATCH_LON_MAX = CFG['catch_lon']
 HINDCAST_DIR = CFG.get('hindcast_dir', SHARED['hindcast_dir'])
 FORECAST_DIR = CFG.get('forecast_dir', SHARED['forecast_dir'])
 SKIP_YEARS = CFG.get('skip_years', set())
+POLYGON_PATH = CFG['polygon']
+
+
+class GridMismatchError(ValueError):
+    """A SEAS5 file is not on the grid the forcing weights were computed on.
+    Never skipped like an unreadable file: it stops the run."""
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -184,9 +206,52 @@ def subset_catchment(ds):
     return ds_catch
 
 
-def area_weighted_mean(da):
-    """Compute latitude-weighted spatial mean."""
-    weights = np.cos(np.deg2rad(da.lat))
+def check_grids_match(hc_file, fc_file):
+    """
+    Hindcast and operational files must share the whole grid (same lat / lon
+    values). Raises GridMismatchError otherwise: a grid offset by half a
+    degree makes the same box select other cells, so the two eras would be
+    averaged over different areas.
+    """
+    with xr.open_dataset(hc_file) as hc, xr.open_dataset(fc_file) as fc:
+        same = (np.array_equal(hc.lat.values, fc.lat.values)
+                and np.array_equal(hc.lon.values, fc.lon.values))
+        if not same:
+            def desc(ds):
+                return (f"{ds.sizes['lat']} x {ds.sizes['lon']}, lat "
+                        f"{ds.lat.values[0]}..{ds.lat.values[-1]}, lon "
+                        f"{ds.lon.values[0]}..{ds.lon.values[-1]}")
+            raise GridMismatchError(
+                f"hindcast and operational grids differ:\n"
+                f"  hindcast    {desc(hc)}  ({hc_file})\n"
+                f"  operational {desc(fc)}  ({fc_file})")
+
+
+def forcing_weights(ref_file):
+    """
+    Weights of the box cells on the grid of `ref_file`: overlap of each cell
+    with the catchment polygon, normalised (seas5ml.spatial.cell_weights).
+    Returns the weights as a (lat, lon) DataArray on the box coordinates and
+    a table of the cells (lat, lon, overlap_km2, weight).
+    """
+    with xr.open_dataset(ref_file) as ds:
+        box = subset_catchment(ds)
+        lat, lon = box.lat.values, box.lon.values
+    polygon = load_polygon(POLYGON_PATH)
+    w, overlap, covered = cell_weights(lat, lon, polygon)
+    weights = xr.DataArray(w, dims=('lat', 'lon'), coords={'lat': lat, 'lon': lon})
+    cells = pd.DataFrame({
+        'lat': np.repeat(lat, len(lon)),
+        'lon': np.tile(lon, len(lat)),
+        'overlap_km2': overlap.ravel(),
+        'weight': w.ravel(),
+    })
+    return weights, cells, covered
+
+
+def weighted_mean(da, weights):
+    """Mean over the box cells, each cell weighted by its overlap with the
+    catchment polygon (weights from forcing_weights)."""
     return da.weighted(weights).mean(dim=['lat', 'lon']).values
 
 
@@ -219,18 +284,26 @@ def check_units_match(hc_file, fc_file):
         ds_fc.close()
 
 
-def extract_vars_from_ds(ds):
+def extract_vars_from_ds(ds, weights):
     """
-    Extract all recognised variables from a dataset.
+    Extract all recognised variables from a dataset as polygon-weighted
+    catchment means.
     Returns dict: short_name -> np.array of shape (time,)
-    Raises KeyError if a required variable is missing.
+    Raises KeyError if a required variable is missing, GridMismatchError if
+    the box cells are not the ones the weights were computed on.
     """
     ds_catch = subset_catchment(ds)
+    if not (np.array_equal(ds_catch.lat.values, weights.lat.values)
+            and np.array_equal(ds_catch.lon.values, weights.lon.values)):
+        raise GridMismatchError(
+            f"box cells lat {ds_catch.lat.values.tolist()} lon "
+            f"{ds_catch.lon.values.tolist()} differ from the weighted cells lat "
+            f"{weights.lat.values.tolist()} lon {weights.lon.values.tolist()}")
     result = {}
 
     for data_var in ds_catch.data_vars:
         if data_var in VAR_MAP:
-            result[data_var] = area_weighted_mean(ds_catch[data_var])
+            result[data_var] = weighted_mean(ds_catch[data_var], weights)
 
     missing = [v for v in OUTPUT_VARS if v not in result]
     if missing:
@@ -247,11 +320,12 @@ def extract_vars_from_ds(ds):
 # label assigned to the rows.
 # ═══════════════════════════════════════════════════════════════════════
 
-def process_trajectory(filepath, source):
+def process_trajectory(filepath, source, weights):
     """
     Process one NetCDF file (hindcast or forecast).
     Expected filename: forecast_YYYY_MM_daily_memberN.nc
     source: 'hindcast' or 'forecast' — used to label the rows.
+    weights: forcing-cell weights (forcing_weights).
     """
     basename = os.path.basename(filepath)
     match = re.match(r'forecast_(\d{4})_(\d{2})_daily_member(\d+)\.nc', basename)
@@ -263,7 +337,7 @@ def process_trajectory(filepath, source):
 
     ds = xr.open_dataset(filepath)
     try:
-        vars_dict, times = extract_vars_from_ds(ds)
+        vars_dict, times = extract_vars_from_ds(ds, weights)
     finally:
         ds.close()
 
@@ -315,10 +389,30 @@ def main():
     hc_files = sorted(glob.glob(os.path.join(HINDCAST_DIR, 'forecast_*.nc')))
     fc_files_check = sorted(glob.glob(os.path.join(FORECAST_DIR, 'forecast_*.nc')))
 
-    if hc_files and fc_files_check:
-        print("  Checking hindcast/forecast unit consistency...")
-        check_units_match(hc_files[0], fc_files_check[0])
-        print("  Units match.")
+    # Both eras are required (the split design trains on one and tests on the
+    # other); a missing folder would otherwise give a one-era table silently.
+    for label, files, folder in (('hindcast', hc_files, HINDCAST_DIR),
+                                 ('operational', fc_files_check, FORECAST_DIR)):
+        if not files:
+            raise FileNotFoundError(f"no {label} files (forecast_*.nc) in {folder}")
+
+    print("  Checking hindcast/forecast unit consistency...")
+    check_units_match(hc_files[0], fc_files_check[0])
+    print("  Units match.")
+    print("  Checking hindcast/forecast grid consistency...")
+    check_grids_match(hc_files[0], fc_files_check[0])
+    print("  Grids match.")
+
+    # Forcing cells: overlap of each box cell with the catchment polygon,
+    # computed once on the (shared) grid; every file is checked against it.
+    weights, cells, covered = forcing_weights(hc_files[0])
+    used = cells[cells['weight'] > 0]
+    print(f"  Forcing cells: {len(used)} of {len(cells)} box cells overlap the "
+          f"catchment polygon ({covered:.2%} of its area inside the box; "
+          f"{POLYGON_PATH})")
+    for row in used.sort_values('weight', ascending=False).itertuples():
+        print(f"    lat {row.lat:6.2f}  lon {row.lon:7.2f}  weight {row.weight:.4f}  "
+              f"({row.overlap_km2:,.0f} km²)")
 
     total_hc = len(hc_files)
     print(f"  Found {total_hc:,} hindcast member files")
@@ -326,11 +420,13 @@ def main():
 
     for i, fpath in enumerate(hc_files, 1):
         try:
-            df = process_trajectory(fpath, source='hindcast')
+            df = process_trajectory(fpath, source='hindcast', weights=weights)
             if df is not None:
                 all_dfs.append(df)
             else:
                 errors += 1
+        except GridMismatchError as e:
+            raise GridMismatchError(f"{os.path.basename(fpath)}: {e}") from e
         except Exception as e:
             errors += 1
             if errors <= 5:
@@ -358,11 +454,13 @@ def main():
 
     for i, fpath in enumerate(fc_files, 1):
         try:
-            df = process_trajectory(fpath, source='forecast')
+            df = process_trajectory(fpath, source='forecast', weights=weights)
             if df is not None:
                 all_dfs.append(df)
             else:
                 errors_fc += 1
+        except GridMismatchError as e:
+            raise GridMismatchError(f"{os.path.basename(fpath)}: {e}") from e
         except Exception as e:
             errors_fc += 1
             if errors_fc <= 5:
@@ -442,6 +540,9 @@ def main():
     out_path = str(features_path(CATCHMENT_ID))
     print(f"\n[5/5] Saving to {out_path}...")
     df_all.to_parquet(out_path, index=False, engine='pyarrow')
+    cells_path = forcing_cells_path(CATCHMENT_ID)
+    cells.to_csv(cells_path, index=False)
+    print(f"  Forcing cells: {cells_path}")
 
     # Fold manifests, one per evaluation design: the ids of the folds the
     # later stages will build (seas5ml.designs.folds), from the hydro years
