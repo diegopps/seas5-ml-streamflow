@@ -60,6 +60,13 @@ Grid guard:
     mismatch stops the run (GridMismatchError). Both eras must be present.
     (The Central Asia operational files were once on a grid offset by half a
     degree, which silently widened their boxes; see TODO.md, SEAS5 FORCING.)
+
+Dates:
+    `date` is the calendar day (normalised; the NetCDF daily means are
+    stamped 12:00 / 09:00, which once kept the discharge merge below from
+    matching any row, so Q was all NaN; the later stages re-attach Q on load
+    and never noticed). Every file's days must be init_date + lead day
+    0 ... 214; otherwise the run stops (DateMismatchError).
 """
 
 import os
@@ -157,6 +164,11 @@ POLYGON_PATH = CFG['polygon']
 
 class GridMismatchError(ValueError):
     """A SEAS5 file is not on the grid the forcing weights were computed on.
+    Never skipped like an unreadable file: it stops the run."""
+
+
+class DateMismatchError(ValueError):
+    """A SEAS5 file's days are not init_date + lead day (0, 1, ... 214).
     Never skipped like an unreadable file: it stops the run."""
 
 
@@ -346,8 +358,19 @@ def process_trajectory(filepath, source, weights):
             f"{basename}: expected {EXPECTED_STEPS} daily steps, got {len(times)}"
         )
 
+    # The CDO daymean time stamps carry a time of day (12:00 on lead day 0,
+    # 09:00 after it): normalise to the calendar day, so `date` joins the
+    # discharge (and ERA5) on the day. Each step must then be its lead day.
+    days = pd.DatetimeIndex(times).normalize()
+    expected = init_date + pd.to_timedelta(np.arange(len(days)), unit='D')
+    if not days.equals(expected):
+        bad = np.flatnonzero(days != expected)
+        raise DateMismatchError(
+            f"{basename}: day of lead day {bad[0]} is {days[bad[0]].date()}, "
+            f"expected {expected[bad[0]].date()} ({len(bad)} steps off)")
+
     df = pd.DataFrame({
-        'date':      times,
+        'date':      days,
         'init_date': init_date,
         'member':    member,
         'lead_day':  np.arange(len(times)),
@@ -425,8 +448,8 @@ def main():
                 all_dfs.append(df)
             else:
                 errors += 1
-        except GridMismatchError as e:
-            raise GridMismatchError(f"{os.path.basename(fpath)}: {e}") from e
+        except (GridMismatchError, DateMismatchError) as e:
+            raise type(e)(f"{os.path.basename(fpath)}: {e}") from e
         except Exception as e:
             errors += 1
             if errors <= 5:
@@ -459,8 +482,8 @@ def main():
                 all_dfs.append(df)
             else:
                 errors_fc += 1
-        except GridMismatchError as e:
-            raise GridMismatchError(f"{os.path.basename(fpath)}: {e}") from e
+        except (GridMismatchError, DateMismatchError) as e:
+            raise type(e)(f"{os.path.basename(fpath)}: {e}") from e
         except Exception as e:
             errors_fc += 1
             if errors_fc <= 5:
