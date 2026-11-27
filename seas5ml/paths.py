@@ -12,6 +12,8 @@ Every output path is built here and nowhere else:
         <catchment>_features.parquet        stage 0 feature table
         <catchment>_folds_<design>.txt      stage 0 fold manifest (fold ids)
         <catchment>_forcing_cells.csv       stage 0 grid cells and weights of the forcing mean
+        <catchment>_era5.parquet            ERA5 daily catchment series on the SEAS5 cells (R2 comparison)
+        era5_parts/<catchment>_<year>.parquet   its per-year pieces (pipeline/0_data/era5/extract_era5.py)
     data/results/<design>/                  one tree per evaluation design
         default/<catchment>/<model>/        stage 1, default configs (all folds)
         tuned/<catchment>/<model>/fold_<id>/  stage 1, nested-CV tuning (one fold)
@@ -38,6 +40,8 @@ with open(CONFIG_FILE, "rb") as _fh:
 DISCHARGE_DIR = REPO_ROOT / CONFIG["paths"]["discharge_dir"]
 SEAS5_DIR     = REPO_ROOT / CONFIG["paths"]["seas5_dir"]
 POLYGON_DIR   = REPO_ROOT / CONFIG["paths"]["polygon_dir"]
+ERA5_DIR      = REPO_ROOT / CONFIG["paths"]["era5_dir"]       # absolute in config.toml: kept as is
+ERA5_SD_DIR   = REPO_ROOT / CONFIG["paths"]["era5_sd_dir"]
 
 # ── Outputs (repo-relative) ──────────────────────────────────────────────
 DATA_DIR      = REPO_ROOT / "data"
@@ -60,6 +64,17 @@ def forcing_cells_path(catchment: str) -> Path:
     one row per cell of the box (lat, lon, overlap with the catchment polygon
     in km², weight)."""
     return PROCESSED_DIR / f"{catchment}_forcing_cells.csv"
+
+
+def era5_path(catchment: str) -> Path:
+    """ERA5 daily series of one catchment, averaged over the same SEAS5 cells
+    and weights as its forcing (pipeline/0_data/era5/extract_era5.py)."""
+    return PROCESSED_DIR / f"{catchment}_era5.parquet"
+
+
+def era5_part_path(catchment: str, year: int) -> Path:
+    """One year of era5_path, written by one task of the extraction array."""
+    return PROCESSED_DIR / "era5_parts" / f"{catchment}_{year}.parquet"
 
 
 def fold_manifest_path(design: str, catchment: str) -> Path:
@@ -116,6 +131,12 @@ def scores_dir(design: str, variant: str, catchment: str, model: str) -> Path:
         raise ValueError(f"unknown score variant '{variant}' "
                          f"(one of {SCORE_VARIANTS})")
     return design_dir(design) / "scores" / variant / catchment / model
+
+
+def metskill_dir(design: str, catchment: str) -> Path:
+    """SEAS5 meteorological skill against ERA5 of one catchment
+    (pipeline/0_data/seas5_skill/score.py): data/results/<design>/seas5_skill/<catchment>/."""
+    return design_dir(design) / "seas5_skill" / catchment
 
 
 def figures_dir(design: str) -> Path:

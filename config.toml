@@ -5,6 +5,8 @@
 discharge_dir = "data/indata/discharge_obs"   # one CSV per catchment: date, Q (m³/s)
 seas5_dir     = "data/indata/ecmwf"           # grib/, netcdf_hindcast/, netcdf_forecast/
 polygon_dir   = "data/catchments"             # one GeoJSON per catchment: watershed polygon (GRDC), WGS84
+era5_dir      = "/p/projects/climate_data_central/reanalysis/ERA5"   # ERA5 hourly, <variable>/<variable>_YYYYMM.nc (PIK copy)
+era5_sd_dir   = "data/indata/era5_snow_depth" # ERA5 snow depth, 00 UTC, downloaded from the CDS (pipeline/0_data/era5/)
 
 [seas5_download]
 region     = "centralasia"             # "centralasia" or "europe"
